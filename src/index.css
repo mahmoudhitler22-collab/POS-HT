@@ -1,0 +1,131 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-bg: 248 250 252;
+    --color-card: 255 255 255;
+    --color-border: 226 232 240;
+    --color-text: 15 23 42;
+    --color-muted: 100 116 139;
+    --color-primary: 15 23 42;
+    --color-primary-hover: 30 41 59;
+    --color-accent: 13 148 136;
+  }
+
+  * {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background-color: rgb(var(--color-bg));
+    color: rgb(var(--color-text));
+  }
+
+  html[lang='ar'] body {
+    font-family: Tahoma, Arial, 'Segoe UI', sans-serif;
+  }
+
+  html[dir='rtl'] input:not([type='number']):not([type='date']),
+  html[dir='rtl'] textarea,
+  html[dir='rtl'] select {
+    direction: rtl;
+    text-align: right;
+  }
+
+  html[dir='rtl'] input::placeholder,
+  html[dir='rtl'] textarea::placeholder {
+    text-align: right;
+  }
+}
+
+/* Existing screens use Tailwind's LTR positioning utilities for search
+   icons. These logical overrides keep the controls usable in Arabic. */
+html[dir='rtl'] .left-3 { left: auto; right: 0.75rem; }
+html[dir='rtl'] .left-4 { left: auto; right: 1rem; }
+html[dir='rtl'] .pl-10 { padding-left: 0.75rem; padding-right: 2.5rem; }
+html[dir='rtl'] .pl-12 { padding-left: 1rem; padding-right: 3rem; }
+html[dir='rtl'] .text-left { text-align: right; }
+html[dir='rtl'] .text-right { text-align: left; }
+
+@layer components {
+  .card {
+    @apply bg-white rounded-2xl border border-slate-200 shadow-sm;
+  }
+
+  .table-row-hover {
+    @apply transition-colors hover:bg-slate-50;
+  }
+
+  .input-clean {
+    @apply w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent transition-all;
+  }
+}
+
+@layer utilities {
+  .animate-slide-in {
+    animation: slide-in 0.25s ease-out;
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.2s ease-out;
+  }
+
+  .animate-scale-in {
+    animation: scale-in 0.15s ease-out;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(203 213 225) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: rgb(203 213 225);
+    border-radius: 3px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@keyframes slide-in {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scale-in {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* Print styles for receipts and barcodes */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

@@ -37,6 +37,21 @@ export interface Product {
   updated_at: string;
 }
 
+export interface ProductVariant {
+  id: number;
+  product_id: number;
+  size: string | null;
+  color: string | null;
+  barcode: string | null;
+  purchase_cost: number | null;
+  selling_price: number | null;
+  quantity: number;
+  min_stock_level: number;
+  is_active: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Category {
   id: number;
   name: string;

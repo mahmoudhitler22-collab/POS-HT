@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { query, execute, transaction, isRunningInElectron, getAuthSessionId } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { logAudit } from '@/lib/audit';
@@ -13,9 +13,11 @@ import { Modal, ConfirmDialog } from '@/components/ui/Modal';
 import type { Product, Category, Brand, Supplier } from '@/types';
 import {
   Plus, Search, Pencil, Archive, RotateCcw, Package, Barcode,
-  AlertTriangle, X, Tag, Folder, Building2, Truck, Printer, Loader2
+  AlertTriangle, X, Tag, Folder, Building2, Truck, Printer, Loader2,
+  Grid3x3, Palette, Ruler
 } from 'lucide-react';
 import { useSettings } from '@/context/SettingsContext';
+import { useLanguage } from '@/context/LanguageContext';
 import { generateLabelHtml, printHtml, getPrinters, type PrinterInfo } from '@/lib/print';
 
 type Tab = 'products' | 'categories' | 'brands' | 'suppliers';
@@ -350,6 +352,7 @@ function ProductFormModal({
   onSaved: () => void;
 }) {
   const { user, hasPermission } = useAuth();
+  const { t } = useLanguage();
   const [form, setForm] = useState({
     name: product?.name || '',
     sku: product?.sku || '',
@@ -357,8 +360,6 @@ function ProductFormModal({
     category_id: product?.category_id || '',
     brand_id: product?.brand_id || '',
     type: product?.type || '',
-    size: product?.size || '',
-    color: product?.color || '',
     purchase_cost: product && product.purchase_cost != null ? String(product.purchase_cost / 100) : '',
     selling_price: product ? String(product.selling_price / 100) : '',
     quantity: product ? String(product.quantity) : '0',
@@ -366,6 +367,96 @@ function ProductFormModal({
     supplier_id: product?.supplier_id || '',
     notes: product?.notes || '',
   });
+
+  // ─── Variant draft state (Color × Size matrix) ────────────
+  // Entirely local — no database persistence in this phase.
+  const [colors, setColors] = useState<string[]>([]);
+  const [sizes, setSizes] = useState<string[]>([]);
+  const [newColor, setNewColor] = useState('');
+  const [newSize, setNewSize] = useState('');
+
+  interface MatrixCell { active: boolean; quantity: string; }
+  const [matrix, setMatrix] = useState<Record<string, MatrixCell>>({});
+
+  const cellKey = (color: string, size: string) => `${color}__${size}`;
+
+  const addColor = () => {
+    const trimmed = newColor.trim();
+    if (!trimmed) return;
+    if (colors.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
+      toast('error', t('Duplicate color name'));
+      return;
+    }
+    setColors((prev) => [...prev, trimmed]);
+    setMatrix((prev) => {
+      const next = { ...prev };
+      for (const s of sizes) {
+        const key = cellKey(trimmed, s);
+        if (!next[key]) next[key] = { active: true, quantity: '0' };
+      }
+      return next;
+    });
+    setNewColor('');
+  };
+
+  const removeColor = (color: string) => {
+    setColors((prev) => prev.filter((c) => c !== color));
+    setMatrix((prev) => {
+      const next = { ...prev };
+      for (const s of sizes) delete next[cellKey(color, s)];
+      return next;
+    });
+  };
+
+  const addSize = () => {
+    const trimmed = newSize.trim();
+    if (!trimmed) return;
+    if (sizes.some((s) => s.toLowerCase() === trimmed.toLowerCase())) {
+      toast('error', t('Duplicate size name'));
+      return;
+    }
+    setSizes((prev) => [...prev, trimmed]);
+    setMatrix((prev) => {
+      const next = { ...prev };
+      for (const c of colors) {
+        const key = cellKey(c, trimmed);
+        if (!next[key]) next[key] = { active: true, quantity: '0' };
+      }
+      return next;
+    });
+    setNewSize('');
+  };
+
+  const removeSize = (size: string) => {
+    setSizes((prev) => prev.filter((s) => s !== size));
+    setMatrix((prev) => {
+      const next = { ...prev };
+      for (const c of colors) delete next[cellKey(c, size)];
+      return next;
+    });
+  };
+
+  const toggleCell = (color: string, size: string) => {
+    const key = cellKey(color, size);
+    setMatrix((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], active: !prev[key]?.active },
+    }));
+  };
+
+  const setCellQuantity = (color: string, size: string, qty: string) => {
+    const key = cellKey(color, size);
+    setMatrix((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], quantity: qty },
+    }));
+  };
+
+  const activeVariantCount = useMemo(() => {
+    let count = 0;
+    for (const c of colors) for (const s of sizes) if (matrix[cellKey(c, s)]?.active) count++;
+    return count;
+  }, [colors, sizes, matrix]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -400,7 +491,7 @@ function ProductFormModal({
           [
             form.name, form.sku || null, form.barcode || null,
             form.category_id || null, form.brand_id || null,
-            form.type || null, form.size || null, form.color || null,
+            form.type || null, null, null,
             cost, price, parseFloat(form.min_stock_level) || 0,
             form.supplier_id || null, form.notes || null,
             product.id,
@@ -427,8 +518,8 @@ function ProductFormModal({
             category_id: form.category_id ? parseInt(String(form.category_id), 10) : null,
             brand_id: form.brand_id ? parseInt(String(form.brand_id), 10) : null,
             type: form.type || null,
-            size: form.size || null,
-            color: form.color || null,
+            size: null,
+            color: null,
             purchase_cost: cost,
             selling_price: price,
             quantity: qty,
@@ -447,7 +538,7 @@ function ProductFormModal({
               [
                 form.name, form.sku || null, form.barcode || null,
                 form.category_id || null, form.brand_id || null,
-                form.type || null, form.size || null, form.color || null,
+                form.type || null, null, null,
                 cost, price, qty, minStock,
                 form.supplier_id || null, form.notes || null,
               ]
@@ -497,12 +588,12 @@ function ProductFormModal({
       )}
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid grid-cols-2 gap-4">
-          <Input label="Product Name *" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-          <Input label="SKU / Product Code" value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} />
+          <Input label={t('Product Name *')} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+          <Input label={t('SKU / Product Code')} value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} />
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-slate-700">Barcode</label>
+            <label className="block text-sm font-medium text-slate-700">{t('Brand')}</label>
             <div className="flex gap-2">
               <input
                 type="text"
@@ -511,41 +602,186 @@ function ProductFormModal({
                 className="input-clean flex-1 font-mono"
               />
               <Button type="button" variant="outline" size="sm" onClick={generateBarcode}>
-                <Barcode size={16} /> Generate
+                <Barcode size={16} /> {t('Generate')}
               </Button>
             </div>
           </div>
-          <Input label="Type" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} placeholder="e.g. Jalabiya, Ihram" />
+          <Input label={t('Type')} value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} placeholder="e.g. Jalabiya, Ihram" />
         </div>
         <div className="grid grid-cols-3 gap-4">
-          <Select label="Category" value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })}>
+          <Select label={t('Category')} value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })}>
             <option value="">— None —</option>
             {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </Select>
-          <Select label="Brand" value={form.brand_id} onChange={(e) => setForm({ ...form, brand_id: e.target.value })}>
+          <Select label={t('Brand')} value={form.brand_id} onChange={(e) => setForm({ ...form, brand_id: e.target.value })}>
             <option value="">— None —</option>
             {brands.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </Select>
-          <Select label="Supplier" value={form.supplier_id} onChange={(e) => setForm({ ...form, supplier_id: e.target.value })}>
+          <Select label={t('Supplier')} value={form.supplier_id} onChange={(e) => setForm({ ...form, supplier_id: e.target.value })}>
             <option value="">— None —</option>
             {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </Select>
         </div>
-        <div className="grid grid-cols-2 gap-4">
-          <Input label="Size" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} placeholder="S, M, L, XL" />
-          <Input label="Color" value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })} placeholder="Black, White, Blue" />
-        </div>
         <div className="grid grid-cols-3 gap-4">
-          <Input label="Purchase Cost (EGP)" type="number" step="0.01" value={form.purchase_cost} onChange={(e) => setForm({ ...form, purchase_cost: e.target.value })} />
-          <Input label="Selling Price (EGP) *" type="number" step="0.01" value={form.selling_price} onChange={(e) => setForm({ ...form, selling_price: e.target.value })} required />
+          <Input label={t('Purchase Cost (EGP)')} type="number" step="0.01" value={form.purchase_cost} onChange={(e) => setForm({ ...form, purchase_cost: e.target.value })} />
+          <Input label={t('Selling Price (EGP) *')} type="number" step="0.01" value={form.selling_price} onChange={(e) => setForm({ ...form, selling_price: e.target.value })} required />
           {!product && (
-            <Input label="Initial Stock Quantity" type="number" step="0.01" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} />
+            <Input label={t('Initial Stock Quantity')} type="number" step="0.01" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} />
           )}
         </div>
         <div className="grid grid-cols-1 gap-4">
-          <Input label="Minimum Stock Level" type="number" step="0.01" value={form.min_stock_level} onChange={(e) => setForm({ ...form, min_stock_level: e.target.value })} />
+          <Input label={t('Minimum Stock Level')} type="number" step="0.01" value={form.min_stock_level} onChange={(e) => setForm({ ...form, min_stock_level: e.target.value })} />
         </div>
-        <Textarea label="Notes" rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+
+        {/* ─── Variant Matrix Editor ─────────────────────────── */}
+        <div className="border border-slate-200 rounded-xl p-4 space-y-4 bg-slate-50/50">
+          <div className="flex items-center gap-2">
+            <Grid3x3 size={18} className="text-teal-600" />
+            <h3 className="text-sm font-semibold text-slate-900">{t('Variants (Color × Size)')}</h3>
+            {activeVariantCount > 0 && (
+              <Badge variant="info">{activeVariantCount} {t('Active')}</Badge>
+            )}
+          </div>
+          <p className="text-xs text-slate-500">{t('Add colors and sizes to generate variant combinations automatically')}</p>
+
+          {/* Colors row */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              <Palette size={15} className="text-slate-500" /> {t('Colors')}
+            </div>
+            <div className="flex flex-wrap gap-2 items-center">
+              {colors.map((c) => (
+                <span key={c} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
+                  {c}
+                  <button type="button" onClick={() => removeColor(c)} className="text-teal-400 hover:text-teal-700">
+                    <X size={14} />
+                  </button>
+                </span>
+              ))}
+              <div className="flex gap-1.5 items-center">
+                <input
+                  type="text"
+                  value={newColor}
+                  onChange={(e) => setNewColor(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addColor(); } }}
+                  placeholder={t('Color name')}
+                  className="w-28 rounded-lg border border-slate-300 px-2.5 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent"
+                />
+                <Button type="button" variant="outline" size="sm" onClick={addColor}>
+                  <Plus size={14} /> {t('Add Color')}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Sizes row */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              <Ruler size={15} className="text-slate-500" /> {t('Sizes')}
+            </div>
+            <div className="flex flex-wrap gap-2 items-center">
+              {sizes.map((s) => (
+                <span key={s} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 text-sm text-blue-800">
+                  {s}
+                  <button type="button" onClick={() => removeSize(s)} className="text-blue-400 hover:text-blue-700">
+                    <X size={14} />
+                  </button>
+                </span>
+              ))}
+              <div className="flex gap-1.5 items-center">
+                <input
+                  type="text"
+                  value={newSize}
+                  onChange={(e) => setNewSize(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSize(); } }}
+                  placeholder={t('Size name')}
+                  className="w-28 rounded-lg border border-slate-300 px-2.5 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent"
+                />
+                <Button type="button" variant="outline" size="sm" onClick={addSize}>
+                  <Plus size={14} /> {t('Add Size')}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Matrix grid */}
+          {colors.length === 0 || sizes.length === 0 ? (
+            <div className="text-center py-6 text-sm text-slate-400">
+              <Grid3x3 size={28} className="mx-auto mb-2 opacity-40" />
+              {t('Add at least one color and one size to see the matrix')}
+            </div>
+          ) : (
+            <div className="overflow-x-auto scrollbar-thin border border-slate-200 rounded-lg bg-white">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200">
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-slate-600 uppercase tracking-wider whitespace-nowrap">
+                      {t('Size')} \ {t('Colors')}
+                    </th>
+                    {colors.map((c) => (
+                      <th key={c} className="px-2 py-2 text-xs font-semibold text-slate-700 text-center whitespace-nowrap">
+                        {c}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {sizes.map((s) => (
+                    <tr key={s} className="hover:bg-slate-50/50">
+                      <td className="px-3 py-2 text-sm font-medium text-slate-700 whitespace-nowrap">{s}</td>
+                      {colors.map((c) => {
+                        const key = cellKey(c, s);
+                        const cell = matrix[key];
+                        const isActive = cell?.active ?? false;
+                        return (
+                          <td key={key} className="px-2 py-1.5 text-center">
+                            {isActive ? (
+                              <div className="flex flex-col items-center gap-1">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={cell?.quantity ?? '0'}
+                                  onChange={(e) => setCellQuantity(c, s, e.target.value)}
+                                  className="w-16 text-center text-sm border border-slate-300 rounded-md px-1.5 py-1 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent"
+                                  placeholder="0"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => toggleCell(c, s)}
+                                  className="text-[10px] text-slate-400 hover:text-red-500 transition-colors"
+                                  title={t('Disable')}
+                                >
+                                  {t('Disable')}
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => toggleCell(c, s)}
+                                className="text-xs text-slate-300 hover:text-teal-600 transition-colors py-1 px-2 rounded-md hover:bg-teal-50"
+                                title={t('This combination is not available')}
+                              >
+                                —
+                              </button>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {activeVariantCount > 0 && (
+            <p className="text-xs text-slate-500">
+              {t('Total active variants')}: <span className="font-semibold text-slate-700">{activeVariantCount}</span>
+            </p>
+          )}
+        </div>
+
+        <Textarea label={t('Notes')} rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
       </form>
     </Modal>
   );

@@ -160,6 +160,17 @@ const operationalAr: Record<string, string> = {
   'Printing failed': 'فشلت الطباعة', 'Receipt sent to printer': 'تم إرسال الإيصال إلى الطابعة',
   'Cash': 'نقدي', 'Card / Visa': 'بطاقة / فيزا', 'Instapay': 'إنستاباي', 'Other': 'أخرى',
   'owner': 'المالك', 'manager': 'المدير', 'cashier': 'الكاشير', 'inventory': 'مسؤول المخزون',
+  'Variants (Color × Size)': 'المتغيرات (اللون × المقاس)',
+  'Add colors and sizes to generate variant combinations automatically': 'أضف الألوان والمقاسات لتوليد المتغيرات تلقائيًا',
+  'Colors': 'الألوان', 'Sizes': 'المقاسات', 'Add Color': 'إضافة لون', 'Add Size': 'إضافة مقاس',
+  'Color name': 'اسم اللون', 'Size name': 'اسم المقاس',
+  'Variant Matrix': 'جدول المتغيرات', 'Qty': 'الكمية', 'Active': 'مفعّل', 'Inactive': 'غير مفعّل',
+  'No colors or sizes added yet': 'لم تتم إضافة ألوان أو مقاسات بعد',
+  'Add at least one color and one size to see the matrix': 'أضف لونًا واحدًا على الأقل ومقاسًا واحدًا لعرض الجدول',
+  'This combination is not available': 'هذا التركيب غير متاح',
+  'Enable': 'تفعيل', 'Disable': 'تعطيل',
+  'Duplicate color name': 'اسم اللون مكرر', 'Duplicate size name': 'اسم المقاس مكرر',
+  'Total active variants': 'إجمالي المتغيرات المفعّلة',
 };
 
 function translateArabicText(value: string): string {

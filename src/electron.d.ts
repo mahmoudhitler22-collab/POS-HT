@@ -75,6 +75,40 @@ export interface ElectronAPI {
       supplier_id: number | null;
       notes: string | null;
     }, sessionId?: number) => Promise<{ success: boolean; productId?: number; error?: string }>;
+    saveProductWithVariants: (payload: {
+      product: {
+        name: string;
+        sku: string | null;
+        barcode: string | null;
+        category_id: number | null;
+        brand_id: number | null;
+        type: string | null;
+        purchase_cost: number;
+        selling_price: number;
+        min_stock_level: number;
+        supplier_id: number | null;
+        notes: string | null;
+      };
+      productId: number | null;
+      variants: Array<{ color: string; size: string; quantity: number; is_active: boolean }>;
+    }, sessionId?: number) => Promise<{ success: boolean; productId?: number; error?: string }>;
+    saveProductWithVariants: (payload: {
+      product: {
+        name: string;
+        sku: string | null;
+        barcode: string | null;
+        category_id: number | null;
+        brand_id: number | null;
+        type: string | null;
+        purchase_cost: number;
+        selling_price: number;
+        min_stock_level: number;
+        supplier_id: number | null;
+        notes: string | null;
+      };
+      productId: number | null;
+      variants: Array<{ color: string; size: string; quantity: number; is_active: boolean }>;
+    }, sessionId?: number) => Promise<{ success: boolean; productId?: number; error?: string }>;
   };
   print: {
     print: (

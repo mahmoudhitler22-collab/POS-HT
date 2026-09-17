@@ -10,12 +10,8 @@ import { Button } from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal, ConfirmDialog } from '@/components/ui/Modal';
-import type { Product, Category, Brand, Supplier } from '@/types';
-import {
-  Plus, Search, Pencil, Archive, RotateCcw, Package, Barcode,
-  AlertTriangle, X, Tag, Folder, Building2, Truck, Printer, Loader2,
-  Grid3x3, Palette, Ruler
-} from 'lucide-react';
+import type { Product, ProductVariant, Category, Brand, Supplier } from '@/types';
+import { Plus, Search, Pencil, Archive, RotateCcw, Package, Barcode, TriangleAlert as AlertTriangle, X, Tag, Folder, Building2, Truck, Printer, Loader as Loader2, Grid3x3, Palette, Ruler } from 'lucide-react';
 import { useSettings } from '@/context/SettingsContext';
 import { useLanguage } from '@/context/LanguageContext';
 import { generateLabelHtml, printHtml, getPrinters, type PrinterInfo } from '@/lib/print';
@@ -457,6 +453,60 @@ function ProductFormModal({
     for (const c of colors) for (const s of sizes) if (matrix[cellKey(c, s)]?.active) count++;
     return count;
   }, [colors, sizes, matrix]);
+
+  // ─── Load existing variants when editing ───────────────────
+  useEffect(() => {
+    if (!product) return;
+    let cancelled = false;
+    (async () => {
+      const res = await query<ProductVariant>(
+        'SELECT id, product_id, color, size, quantity, is_active FROM product_variants WHERE product_id = $1 AND is_active = 1',
+        [product.id]
+      );
+      if (cancelled) return;
+      const loadedColors = new Set<string>();
+      const loadedSizes = new Set<string>();
+      const loadedMatrix: Record<string, MatrixCell> = {};
+      for (const v of res.rows) {
+        const color = (v.color || '').trim();
+        const size = (v.size || '').trim();
+        if (!color || !size) continue;
+        loadedColors.add(color);
+        loadedSizes.add(size);
+        loadedMatrix[cellKey(color, size)] = {
+          active: v.is_active === 1,
+          quantity: String(v.quantity),
+        };
+      }
+      const sortedColors = [...loadedColors];
+      const sortedSizes = [...loadedSizes];
+      setColors(sortedColors);
+      setSizes(sortedSizes);
+      setMatrix(loadedMatrix);
+    })();
+    return () => { cancelled = true; };
+  }, [product]);
+
+  // ─── Collect active variants from the matrix ──────────────
+  const collectVariants = (): Array<{ color: string; size: string; quantity: number; is_active: boolean }> => {
+    const variants: Array<{ color: string; size: string; quantity: number; is_active: boolean }> = [];
+    for (const c of colors) {
+      for (const s of sizes) {
+        const cell = matrix[cellKey(c, s)];
+        if (cell?.active) {
+          const qty = parseFloat(cell.quantity) || 0;
+          variants.push({
+            color: c.trim(),
+            size: s.trim(),
+            quantity: qty,
+            is_active: true,
+          });
+        }
+      }
+    }
+    return variants;
+  };
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -480,85 +530,145 @@ function ProductFormModal({
         return;
       }
 
-      if (product) {
-        const prevRes = await query('SELECT * FROM products WHERE id = $1', [product.id]);
-        await execute(
-          `UPDATE products SET
-            name = $1, sku = $2, barcode = $3, category_id = $4, brand_id = $5,
-            type = $6, size = $7, color = $8, purchase_cost = $9, selling_price = $10,
-            min_stock_level = $11, supplier_id = $12, notes = $13, updated_at = datetime('now')
-          WHERE id = $14`,
-          [
-            form.name, form.sku || null, form.barcode || null,
-            form.category_id || null, form.brand_id || null,
-            form.type || null, null, null,
-            cost, price, parseFloat(form.min_stock_level) || 0,
-            form.supplier_id || null, form.notes || null,
-            product.id,
-          ]
-        );
-        await logAudit({
-          user_id: user?.id ?? null,
-          action: 'product_update',
-          entity_type: 'product',
-          entity_id: product.id,
-          previous_value: JSON.stringify(prevRes.rows[0]),
-          new_value: JSON.stringify(form),
-        });
-        toast('success', 'Product updated');
-      } else {
-        const qty = parseFloat(form.quantity) || 0;
-        const minStock = parseFloat(form.min_stock_level) || 0;
+      const variants = collectVariants();
+      const minStock = parseFloat(form.min_stock_level) || 0;
 
-        if (isRunningInElectron() && window.electronAPI.db.createProduct) {
-          const result = await window.electronAPI.db.createProduct({
-            name: form.name,
-            sku: form.sku || null,
-            barcode: form.barcode || null,
-            category_id: form.category_id ? parseInt(String(form.category_id), 10) : null,
-            brand_id: form.brand_id ? parseInt(String(form.brand_id), 10) : null,
-            type: form.type || null,
-            size: null,
-            color: null,
-            purchase_cost: cost,
-            selling_price: price,
-            quantity: qty,
-            min_stock_level: minStock,
-            supplier_id: form.supplier_id ? parseInt(String(form.supplier_id), 10) : null,
-            notes: form.notes || null,
-          }, getAuthSessionId());
-          if (!result.success || result.productId === undefined) {
-            throw new Error(result.error || 'Failed to create product');
-          }
+      const productPayload = {
+        name: form.name,
+        sku: form.sku || null,
+        barcode: form.barcode || null,
+        category_id: form.category_id ? parseInt(String(form.category_id), 10) : null,
+        brand_id: form.brand_id ? parseInt(String(form.brand_id), 10) : null,
+        type: form.type || null,
+        purchase_cost: cost,
+        selling_price: price,
+        min_stock_level: minStock,
+        supplier_id: form.supplier_id ? parseInt(String(form.supplier_id), 10) : null,
+        notes: form.notes || null,
+      };
+
+      if (isRunningInElectron() && window.electronAPI.db.saveProductWithVariants) {
+        const result = await window.electronAPI.db.saveProductWithVariants(
+          {
+            product: productPayload,
+            productId: product ? product.id : null,
+            variants,
+          },
+          getAuthSessionId()
+        );
+        if (!result.success || result.productId === undefined) {
+          throw new Error(result.error || 'Failed to save product');
+        }
+        if (product) {
+          await logAudit({
+            user_id: user?.id ?? null,
+            action: 'product_update',
+            entity_type: 'product',
+            entity_id: product.id,
+            new_value: JSON.stringify({ product: productPayload, variants }),
+          });
+          toast('success', 'Product updated');
         } else {
-          await transaction(async (tx) => {
-            const res = await tx.query<{ id: number }>(
-              `INSERT INTO products (name, sku, barcode, category_id, brand_id, type, size, color, purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
+          toast('success', 'Product created');
+        }
+      } else {
+        // ─── PGlite fallback path ───────────────────────────
+        await transaction(async (tx) => {
+          let productId: number;
+
+          if (product) {
+            productId = product.id;
+            await tx.exec(
+              `UPDATE products SET
+                name = $1, sku = $2, barcode = $3, category_id = $4, brand_id = $5,
+                type = $6, size = NULL, color = NULL,
+                purchase_cost = $7, selling_price = $8,
+                min_stock_level = $9, supplier_id = $10, notes = $11,
+                updated_at = datetime('now')
+              WHERE id = $12`,
               [
                 form.name, form.sku || null, form.barcode || null,
-                form.category_id || null, form.brand_id || null,
-                form.type || null, null, null,
-                cost, price, qty, minStock,
-                form.supplier_id || null, form.notes || null,
+                productPayload.category_id, productPayload.brand_id,
+                productPayload.type,
+                cost, price, minStock,
+                productPayload.supplier_id, productPayload.notes,
+                productId,
               ]
             );
-            const newId = res.rows[0].id;
-            if (qty > 0) {
+          } else {
+            const res = await tx.query<{ id: number }>(
+              `INSERT INTO products (name, sku, barcode, category_id, brand_id, type, size, color, purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes)
+               VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7, $8, 0, $9, $10, $11) RETURNING id`,
+              [
+                form.name, form.sku || null, form.barcode || null,
+                productPayload.category_id, productPayload.brand_id,
+                productPayload.type,
+                cost, price, minStock,
+                productPayload.supplier_id, productPayload.notes,
+              ]
+            );
+            productId = res.rows[0].id;
+          }
+
+          // Load existing variants for this product
+          const existingRes = await tx.query<{ id: number; color: string; size: string; quantity: number; is_active: number }>(
+            'SELECT id, color, size, quantity, is_active FROM product_variants WHERE product_id = $1',
+            [productId]
+          );
+          const existingMap = new Map<string, { id: number; quantity: number; is_active: number }>();
+          for (const e of existingRes.rows) {
+            existingMap.set(`${(e.color || '').toLowerCase()}|${(e.size || '').toLowerCase()}`, { id: e.id, quantity: e.quantity, is_active: e.is_active });
+          }
+
+          const desiredKeys = new Set<string>();
+          for (const v of variants) {
+            const color = v.color.trim();
+            const size = v.size.trim();
+            const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
+            desiredKeys.add(key);
+
+            const ex = existingMap.get(key);
+            if (ex) {
+              const isActiveInt = v.is_active ? 1 : 0;
+              if (ex.quantity !== v.quantity || ex.is_active !== isActiveInt) {
+                await tx.exec(
+                  'UPDATE product_variants SET quantity = $1, is_active = $2, updated_at = datetime(\'now\') WHERE id = $3',
+                  [v.quantity, isActiveInt, ex.id]
+                );
+              }
+            } else {
+              const vRes = await tx.query<{ id: number }>(
+                'INSERT INTO product_variants (product_id, color, size, quantity, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+                [productId, color, size, v.quantity, v.is_active ? 1 : 0]
+              );
+              const variantId = vRes.rows[0].id;
+              if (v.quantity > 0) {
+                await tx.exec(
+                  `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
+                   VALUES ($1, $2, $3, 0, $4, 'Initial stock', 'variant_create', NULL, $5)`,
+                  [productId, variantId, v.quantity, v.quantity, user?.id]
+                );
+              }
+            }
+          }
+
+          // Deactivate variants no longer in the matrix
+          for (const [key, ex] of existingMap) {
+            if (!desiredKeys.has(key) && ex.is_active === 1) {
               await tx.exec(
-                `INSERT INTO inventory_movements (product_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
-                 VALUES ($1, $2, 0, $3, 'Initial stock', 'product_create', $4, $5)`,
-                [newId, qty, qty, newId, user?.id]
+                'UPDATE product_variants SET is_active = 0, updated_at = datetime(\'now\') WHERE id = $1',
+                [ex.id]
               );
             }
-            await tx.exec(
-              `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_value)
-               VALUES ($1, 'product_create', 'product', $2, $3)`,
-              [user?.id ?? null, newId, JSON.stringify(form)]
-            );
-          });
-        }
-        toast('success', 'Product created');
+          }
+
+          await tx.exec(
+            `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_value)
+             VALUES ($1, $2, 'product', $3, $4)`,
+            [user?.id ?? null, product ? 'product_update' : 'product_create', productId, JSON.stringify({ product: productPayload, variants })]
+          );
+        });
+        toast('success', product ? 'Product updated' : 'Product created');
       }
       onSaved();
     } catch (err) {

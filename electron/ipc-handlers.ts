@@ -649,6 +649,181 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     }
   });
 
+  // ─── Save Product With Variants (create or update atomically) ─
+  // Handles both new product creation and existing product editing.
+  // Variants are diffed against the database: new combinations are
+  // inserted, existing ones are updated, and combos no longer in the
+  // matrix are deactivated.  Everything runs in one SQLite transaction.
+  interface VariantInput {
+    color: string;
+    size: string;
+    quantity: number;
+    is_active: boolean;
+  }
+
+  ipcMain.handle('db:saveProductWithVariants', async (
+    _event,
+    payload: {
+      product: {
+        name: string;
+        sku: string | null;
+        barcode: string | null;
+        category_id: number | null;
+        brand_id: number | null;
+        type: string | null;
+        purchase_cost: number;
+        selling_price: number;
+        min_stock_level: number;
+        supplier_id: number | null;
+        notes: string | null;
+      };
+      productId: number | null;
+      variants: VariantInput[];
+    },
+    sessionId?: number,
+  ): Promise<{ success: boolean; productId?: number; error?: string }> => {
+    try {
+      const validation = validateSession(sessionId);
+      if (!validation.ok) return { success: false, error: validation.error };
+
+      const isEdit = payload.productId !== null && payload.productId !== undefined;
+      const perm = isEdit ? 'products' : 'products.add';
+      const permCheck = requirePermission(sessionId!, perm);
+      if (!permCheck.ok) return { success: false, error: permCheck.error };
+
+      // Server-side validation
+      const p = payload.product;
+      if (!p.name || !p.name.trim()) return { success: false, error: 'Product name is required' };
+      if (p.selling_price <= 0) return { success: false, error: 'Selling price must be greater than zero' };
+      if (p.purchase_cost < 0) return { success: false, error: 'Purchase cost cannot be negative' };
+
+      // Validate variants
+      const seen = new Set<string>();
+      for (const v of payload.variants) {
+        const color = (v.color || '').trim();
+        const size = (v.size || '').trim();
+        if (!color || !size) return { success: false, error: 'Variant color and size are required' };
+        const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
+        if (seen.has(key)) return { success: false, error: `Duplicate variant: ${color} / ${size}` };
+        seen.add(key);
+        if (!Number.isFinite(v.quantity) || v.quantity < 0) return { success: false, error: 'Variant quantities must be non-negative' };
+      }
+
+      const session = getSession(sessionId!)!;
+      const db = getDb();
+
+      const result = db.transaction(() => {
+        let productId: number;
+
+        if (isEdit) {
+          productId = payload.productId!;
+          db.prepare(
+            `UPDATE products SET
+              name = ?, sku = ?, barcode = ?, category_id = ?, brand_id = ?,
+              type = ?, size = NULL, color = NULL,
+              purchase_cost = ?, selling_price = ?,
+              min_stock_level = ?, supplier_id = ?, notes = ?,
+              updated_at = datetime('now')
+            WHERE id = ?`
+          ).run(
+            p.name.trim(), p.sku || null, p.barcode || null,
+            p.category_id || null, p.brand_id || null,
+            p.type || null,
+            p.purchase_cost, p.selling_price,
+            p.min_stock_level, p.supplier_id || null,
+            p.notes || null,
+            productId,
+          );
+        } else {
+          const info = db.prepare(
+            `INSERT INTO products (name, sku, barcode, category_id, brand_id, type, size, color, purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes)
+             VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 0, ?, ?, ?)`
+          ).run(
+            p.name.trim(), p.sku || null, p.barcode || null,
+            p.category_id || null, p.brand_id || null,
+            p.type || null,
+            p.purchase_cost, p.selling_price,
+            p.min_stock_level, p.supplier_id || null,
+            p.notes || null,
+          );
+          productId = Number(info.lastInsertRowid);
+        }
+
+        // ─── Variant sync ──────────────────────────────────
+        // Load existing variants for this product
+        const existing = db.prepare(
+          'SELECT id, color, size, quantity, is_active FROM product_variants WHERE product_id = ?'
+        ).all(productId) as Array<{ id: number; color: string; size: string; quantity: number; is_active: number }>;
+
+        // Build lookup of existing variants by lowercase color|size
+        const existingMap = new Map<string, { id: number; quantity: number; is_active: number }>();
+        for (const e of existing) {
+          existingMap.set(`${(e.color || '').toLowerCase()}|${(e.size || '').toLowerCase()}`, { id: e.id, quantity: e.quantity, is_active: e.is_active });
+        }
+
+        // Build set of desired variant keys
+        const desiredKeys = new Set<string>();
+        const insertVariant = db.prepare(
+          `INSERT INTO product_variants (product_id, color, size, quantity, is_active)
+           VALUES (?, ?, ?, ?, ?)`
+        );
+        const updateVariant = db.prepare(
+          `UPDATE product_variants SET quantity = ?, is_active = ?, updated_at = datetime('now') WHERE id = ?`
+        );
+        const insertMovement = db.prepare(
+          `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
+           VALUES (?, ?, ?, 0, ?, 'Initial stock', 'variant_create', NULL, ?)`
+        );
+
+        for (const v of payload.variants) {
+          const color = v.color.trim();
+          const size = v.size.trim();
+          const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
+          desiredKeys.add(key);
+
+          const ex = existingMap.get(key);
+          if (ex) {
+            // Update existing variant
+            const isActiveInt = v.is_active ? 1 : 0;
+            const needsUpdate = ex.quantity !== v.quantity || ex.is_active !== isActiveInt;
+            if (needsUpdate) {
+              updateVariant.run(v.quantity, isActiveInt, ex.id);
+            }
+          } else {
+            // Insert new variant
+            const vInfo = insertVariant.run(productId, color, size, v.quantity, v.is_active ? 1 : 0);
+            const variantId = Number(vInfo.lastInsertRowid);
+            // Record initial stock movement if quantity > 0
+            if (v.quantity > 0) {
+              insertMovement.run(productId, variantId, v.quantity, v.quantity, session.userId);
+            }
+          }
+        }
+
+        // Deactivate variants that are no longer in the matrix
+        for (const [key, ex] of existingMap) {
+          if (!desiredKeys.has(key) && ex.is_active === 1) {
+            updateVariant.run(ex.quantity, 0, ex.id);
+          }
+        }
+
+        // Audit log
+        db.prepare(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_value)
+           VALUES (?, ?, 'product', ?, ?)`
+        ).run(session.userId, isEdit ? 'product_update' : 'product_create', productId, JSON.stringify({ product: p, variants: payload.variants }));
+
+        return productId;
+      })();
+
+      return { success: true, productId: result };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save product';
+      const friendly = msg.includes('unique') || msg.includes('UNIQUE') ? 'SKU or barcode already exists' : msg;
+      return { success: false, error: friendly };
+    }
+  });
+
   // ─── Backup (requires 'backup' permission) ────────────────
   ipcMain.handle('db:backup', async (_event, label?: string, sessionId?: number) => {
     const validation = validateSession(sessionId);

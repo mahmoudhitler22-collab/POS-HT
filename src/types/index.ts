@@ -35,6 +35,7 @@ export interface Product {
   is_active: number;
   created_at: string;
   updated_at: string;
+  variant_total_stock?: number | null;
 }
 
 export interface ProductVariant {

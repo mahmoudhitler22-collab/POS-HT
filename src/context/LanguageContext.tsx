@@ -105,6 +105,7 @@ const operationalAr: Record<string, string> = {
   'Save Product': 'حفظ المنتج', 'Saving...': 'جارٍ الحفظ...', 'Product Name *': 'اسم المنتج *',
   'SKU / Product Code': 'كود المنتج / SKU', 'Generate': 'توليد', 'Type': 'النوع', 'Category': 'التصنيف',
   'Brand': 'العلامة التجارية', 'Supplier': 'المورد', 'Size': 'المقاس', 'Color': 'اللون',
+  'Barcode': 'الباركود',
   'Purchase Cost (EGP)': 'سعر الشراء (جنيه)', 'Selling Price (EGP) *': 'سعر البيع (جنيه) *',
   'Initial Stock Quantity': 'كمية المخزون الابتدائية', 'Minimum Stock Level': 'الحد الأدنى للمخزون',
   'Notes': 'ملاحظات', 'Search by name, SKU, or barcode...': 'ابحث بالاسم أو كود المنتج أو الباركود...',

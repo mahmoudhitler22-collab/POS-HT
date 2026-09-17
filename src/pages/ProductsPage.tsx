@@ -55,7 +55,11 @@ export function ProductsPage() {
              p.type, p.size, p.color, ${costColumn} p.selling_price,
              p.quantity, p.min_stock_level, p.supplier_id, p.is_active,
              p.notes, p.created_at, p.updated_at,
-             c.name as category_name, b.name as brand_name
+             c.name as category_name, b.name as brand_name,
+             COALESCE((
+               SELECT SUM(pv.quantity) FROM product_variants pv
+               WHERE pv.product_id = p.id AND pv.is_active = 1
+             ), NULL) as variant_total_stock
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
       LEFT JOIN brands b ON p.brand_id = b.id
@@ -241,11 +245,18 @@ export function ProductsPage() {
                         )}
                         <td className="px-4 py-3 text-right text-sm font-medium text-slate-900">{formatEgp(p.selling_price)}</td>
                         <td className="px-4 py-3 text-right">
-                          <span className={`text-sm font-medium ${p.quantity <= 0 ? 'text-red-600' : p.quantity <= p.min_stock_level ? 'text-amber-600' : 'text-slate-700'}`}>
-                            {formatQuantity(p.quantity)}
-                          </span>
-                          {p.quantity <= 0 && <Badge variant="danger">Out</Badge>}
-                          {p.quantity > 0 && p.quantity <= p.min_stock_level && <Badge variant="warning">Low</Badge>}
+                          {(() => {
+                            const displayQty = p.variant_total_stock != null ? p.variant_total_stock : p.quantity;
+                            return (
+                              <>
+                                <span className={`text-sm font-medium ${displayQty <= 0 ? 'text-red-600' : displayQty <= p.min_stock_level ? 'text-amber-600' : 'text-slate-700'}`}>
+                                  {formatQuantity(displayQty)}
+                                </span>
+                                {displayQty <= 0 && <Badge variant="danger">Out</Badge>}
+                                {displayQty > 0 && displayQty <= p.min_stock_level && <Badge variant="warning">Low</Badge>}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex items-center justify-center gap-1">
@@ -703,7 +714,7 @@ function ProductFormModal({
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-slate-700">{t('Brand')}</label>
+            <label className="block text-sm font-medium text-slate-700">{t('Barcode')}</label>
             <div className="flex gap-2">
               <input
                 type="text"

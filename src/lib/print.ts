@@ -75,6 +75,9 @@ export function generateReceiptHtml(data: ReceiptData): string {
     ? ({ Cash: 'نقدي', 'Card / Visa': 'بطاقة / فيزا', Instapay: 'إنستاباي', Other: 'أخرى' }[data.paymentMethod] ?? data.paymentMethod)
     : data.paymentMethod;
   const locale = isArabic ? 'ar-EG' : 'en-US';
+  const discountPercent = data.subtotal > 0 ? (data.discountAmount / data.subtotal) * 100 : 0;
+  const showSpecialDiscount = discountPercent > 10;
+  const specialDiscountLabel = isArabic ? 'خصم خاص' : 'Special Discount';
   const itemsHtml = data.items.map((item) => `
     <tr>
       <td class="item-name">${escapeHtml(item.product_name)}</td>
@@ -141,7 +144,7 @@ export function generateReceiptHtml(data: ReceiptData): string {
   <div class="divider"></div>
   <div class="totals">
     <div class="info-row"><span>${labels.subtotal}:</span><span>${formatEgp(data.subtotal)}</span></div>
-    ${data.discountAmount > 0 ? `<div class="info-row" style="color:#555;"><span>${labels.discount}:</span><span>-${formatEgp(data.discountAmount)}</span></div>` : ''}
+    ${data.discountAmount > 0 ? `<div class="info-row" style="color:#555;"><span>${labels.discount}:</span><span>-${formatEgp(data.discountAmount)}</span></div>${showSpecialDiscount ? `<div class="info-row" style="color:#555; font-style:italic;"><span>${specialDiscountLabel}</span><span></span></div>` : ''}` : ''}
     <div class="info-row total-row"><span>${labels.total}:</span><span>${formatEgp(data.total)}</span></div>
     <div class="info-row" style="margin-top:4px;"><span>${labels.payment}:</span><span>${escapeHtml(paymentMethod)}</span></div>
   </div>

@@ -81,6 +81,8 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
   const storePhone = get('store_phone', '');
   const receiptFooter = get('receipt_footer', 'Thank you for shopping with us!');
   const date = new Date(data.sale.created_at);
+  const discountPercent = data.sale.subtotal > 0 ? (data.sale.discount_amount / data.sale.subtotal) * 100 : 0;
+  const showSpecialDiscount = discountPercent > 10;
 
   const handlePrint = async () => {
     setPrinting(true);
@@ -218,6 +220,11 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
             <div className="flex justify-between text-red-600">
               <span>Discount:</span>
               <span>-{formatEgp(data.sale.discount_amount)}</span>
+            </div>
+          )}
+          {showSpecialDiscount && (
+            <div className="flex justify-between text-red-600 italic">
+              <span>{isArabic ? 'خصم خاص' : 'Special Discount'}</span>
             </div>
           )}
           <div className="flex justify-between text-base font-bold border-t border-slate-300 pt-1 mt-1">

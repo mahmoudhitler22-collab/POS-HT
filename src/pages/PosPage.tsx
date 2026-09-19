@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useImperativeHandle, forwardRef } from 'react';
 import { getAuthSessionId, query, transaction } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { useSettings } from '@/context/SettingsContext';
@@ -8,12 +8,12 @@ import { arabicSearchPattern, normalizeArabicSql } from '@/lib/search';
 import { toast } from '@/components/ui/Toast';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Input';
-import { Modal } from '@/components/ui/Modal';
+import { Modal, ConfirmDialog } from '@/components/ui/Modal';
 import { Receipt } from '@/components/Receipt';
 import type { Product, ProductVariant, CartItem, Sale } from '@/types';
 import {
   Search, Plus, Minus, Trash2, ShoppingCart, Barcode,
-  CreditCard, Banknote, Smartphone, Wallet, Check
+  CreditCard, Banknote, Smartphone, Wallet, Check, X,
 } from 'lucide-react';
 
 type PosProduct = Product & { variant_count: number; variant_total_stock: number };
@@ -21,26 +21,103 @@ type PosProduct = Product & { variant_count: number; variant_total_stock: number
 const cartItemKey = (productId: number, variantId: number | null) =>
   `${productId}:${variantId ?? 'product'}`;
 
-export function PosPage() {
+// ─── Per-tab snapshot ──────────────────────────────────────
+// Everything a sale tab needs to be fully restored after switching.
+interface SaleTabState {
+  id: number;
+  label: string;
+  search: string;
+  searchResults: PosProduct[];
+  variantProduct: PosProduct | null;
+  variantChoices: ProductVariant[];
+  cart: CartItem[];
+  customerId: string;
+  paymentMethod: string;
+  showPaymentModal: boolean;
+  isCompletingSale: boolean;
+  completedSale: Sale | null;
+  globalDiscountType: 'percentage' | 'fixed' | 'none';
+  globalDiscountValue: string;
+  // barcode-scanner transient refs (not critical to restore but kept for consistency)
+  barcodeBuffer: string;
+  lastKeyTime: number;
+}
+
+let tabIdCounter = 1;
+
+function createTabState(label: string): SaleTabState {
+  return {
+    id: tabIdCounter++,
+    label,
+    search: '',
+    searchResults: [],
+    variantProduct: null,
+    variantChoices: [],
+    cart: [],
+    customerId: '',
+    paymentMethod: 'Cash',
+    showPaymentModal: false,
+    isCompletingSale: false,
+    completedSale: null,
+    globalDiscountType: 'none',
+    globalDiscountValue: '',
+    barcodeBuffer: '',
+    lastKeyTime: 0,
+  };
+}
+
+// ─── Active sale panel ─────────────────────────────────────
+// Renders a single sale session. PosPage passes in the saved snapshot
+// and calls ref.capture() before switching away to persist state.
+export interface PosSalePanelHandle {
+  capture: () => SaleTabState;
+}
+
+const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(function PosSalePanel(
+  { tab },
+  ref,
+) {
   const { user, hasPermission } = useAuth();
   const { get } = useSettings();
-  const [search, setSearch] = useState('');
-  const [searchResults, setSearchResults] = useState<PosProduct[]>([]);
-  const [variantProduct, setVariantProduct] = useState<PosProduct | null>(null);
-  const [variantChoices, setVariantChoices] = useState<ProductVariant[]>([]);
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [customerId, setCustomerId] = useState<string>('');
+  const [search, setSearch] = useState(tab.search);
+  const [searchResults, setSearchResults] = useState<PosProduct[]>(tab.searchResults);
+  const [variantProduct, setVariantProduct] = useState<PosProduct | null>(tab.variantProduct);
+  const [variantChoices, setVariantChoices] = useState<ProductVariant[]>(tab.variantChoices);
+  const [cart, setCart] = useState<CartItem[]>(tab.cart);
+  const [customerId, setCustomerId] = useState<string>(tab.customerId);
   const [customers, setCustomers] = useState<{ id: number; name: string; phone: string | null }[]>([]);
-  const [paymentMethod, setPaymentMethod] = useState('Cash');
-  const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [isCompletingSale, setIsCompletingSale] = useState(false);
-  const [completedSale, setCompletedSale] = useState<Sale | null>(null);
-  const [globalDiscountType, setGlobalDiscountType] = useState<'percentage' | 'fixed' | 'none'>('none');
-  const [globalDiscountValue, setGlobalDiscountValue] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState(tab.paymentMethod);
+  const [showPaymentModal, setShowPaymentModal] = useState(tab.showPaymentModal);
+  const [isCompletingSale, setIsCompletingSale] = useState(tab.isCompletingSale);
+  const [completedSale, setCompletedSale] = useState<Sale | null>(tab.completedSale);
+  const [globalDiscountType, setGlobalDiscountType] = useState<'percentage' | 'fixed' | 'none'>(tab.globalDiscountType);
+  const [globalDiscountValue, setGlobalDiscountValue] = useState(tab.globalDiscountValue);
   const searchRef = useRef<HTMLInputElement>(null);
-  const barcodeBufferRef = useRef<string>('');
-  const lastKeyTimeRef = useRef<number>(0);
+  const barcodeBufferRef = useRef<string>(tab.barcodeBuffer);
+  const lastKeyTimeRef = useRef<number>(tab.lastKeyTime);
   const completingSaleRef = useRef(false);
+
+  // Expose the current state so PosPage can snapshot before switching tabs.
+  useImperativeHandle(ref, () => ({
+    capture: () => ({
+      id: tab.id,
+      label: tab.label,
+      search,
+      searchResults,
+      variantProduct,
+      variantChoices,
+      cart,
+      customerId,
+      paymentMethod,
+      showPaymentModal,
+      isCompletingSale,
+      completedSale,
+      globalDiscountType,
+      globalDiscountValue,
+      barcodeBuffer: barcodeBufferRef.current,
+      lastKeyTime: lastKeyTimeRef.current,
+    }),
+  }), [tab, search, searchResults, variantProduct, variantChoices, cart, customerId, paymentMethod, showPaymentModal, isCompletingSale, completedSale, globalDiscountType, globalDiscountValue]);
 
   const paymentMethods: string[] = (() => {
     try { return JSON.parse(get('payment_methods', '["Cash","Card / Visa","Instapay","Other"]')); }
@@ -463,7 +540,7 @@ export function PosPage() {
   };
 
   return (
-    <div className="flex h-[calc(100vh-3rem)] gap-6 -m-6">
+    <div className="flex h-full gap-6">
       {/* Left: Product Search */}
       <div className="flex-1 flex flex-col">
         <div className="p-6 pb-3">
@@ -746,6 +823,129 @@ export function PosPage() {
       {completedSale && (
         <Receipt saleId={completedSale.id} onClose={() => setCompletedSale(null)} />
       )}
+    </div>
+  );
+});
+
+// ─── Tab manager ───────────────────────────────────────────
+export function PosPage() {
+  const [tabs, setTabs] = useState<SaleTabState[]>(() => [createTabState('Sale 1')]);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [closeTarget, setCloseTarget] = useState<number | null>(null);
+  const panelRef = useRef<PosSalePanelHandle>(null);
+
+  const captureActive = useCallback((): SaleTabState => {
+    if (panelRef.current) {
+      return panelRef.current.capture();
+    }
+    return tabs[activeIndex];
+  }, [tabs, activeIndex]);
+
+  const switchTab = (index: number) => {
+    if (index === activeIndex) return;
+    const snapshot = captureActive();
+    setTabs((prev) => prev.map((t, i) => (i === activeIndex ? snapshot : t)));
+    setActiveIndex(index);
+  };
+
+  const addTab = () => {
+    const snapshot = captureActive();
+    setTabs((prev) => {
+      const next = prev.map((t, i) => (i === activeIndex ? snapshot : t));
+      const newTab = createTabState(`Sale ${prev.length + 1}`);
+      next.push(newTab);
+      setActiveIndex(next.length - 1);
+      return next;
+    });
+  };
+
+  const requestCloseTab = (index: number) => {
+    // Capture current state first so the confirmation reflects reality.
+    if (index === activeIndex) {
+      const snapshot = captureActive();
+      setTabs((prev) => prev.map((t, i) => (i === activeIndex ? snapshot : t)));
+    }
+    setCloseTarget(index);
+  };
+
+  const confirmCloseTab = () => {
+    if (closeTarget === null) return;
+    const index = closeTarget;
+    setCloseTarget(null);
+    setTabs((prev) => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter((_, i) => i !== index);
+      const newIndex = index >= next.length ? next.length - 1 : (index < activeIndex ? activeIndex - 1 : activeIndex);
+      setActiveIndex(Math.max(0, newIndex));
+      // Relabel tabs sequentially
+      return next.map((t, i) => ({ ...t, label: `Sale ${i + 1}` }));
+    });
+  };
+
+  const cancelCloseTab = () => setCloseTarget(null);
+
+  const closeTargetHasItems = closeTarget !== null && tabs[closeTarget]?.cart.length > 0;
+
+  return (
+    <div className="flex flex-col h-[calc(100vh-3rem)] -m-6">
+      {/* Sale tab bar */}
+      <div className="flex items-center gap-1 px-4 pt-3 bg-white border-b border-slate-200">
+        <div className="flex items-center gap-1 flex-1 overflow-x-auto scrollbar-thin">
+          {tabs.map((tab, index) => (
+            <div
+              key={tab.id}
+              className={`group flex items-center gap-2 px-4 py-2 rounded-t-lg cursor-pointer text-sm font-medium transition-colors ${
+                index === activeIndex
+                  ? 'bg-teal-50 text-teal-700 border-t border-l border-r border-teal-200'
+                  : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+              }`}
+              onClick={() => switchTab(index)}
+            >
+              <span className="flex items-center gap-1.5">
+                {tab.cart.length > 0 && (
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-teal-100 text-teal-700 text-[10px] font-bold">
+                    {tab.cart.length}
+                  </span>
+                )}
+                {tab.label}
+              </span>
+              {tabs.length > 1 && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); requestCloseTab(index); }}
+                  className="ml-1 p-0.5 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 opacity-60 group-hover:opacity-100 transition-opacity"
+                  title="Close tab"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={addTab}
+          className="flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-medium text-teal-600 hover:bg-teal-50 transition-colors flex-shrink-0"
+          title="New sale tab"
+        >
+          <Plus size={16} /> New Sale
+        </button>
+      </div>
+
+      {/* Active sale panel */}
+      <div className="flex-1 overflow-hidden">
+        <PosSalePanel ref={panelRef} tab={tabs[activeIndex]} />
+      </div>
+
+      {/* Close-tab confirmation */}
+      <ConfirmDialog
+        open={closeTarget !== null}
+        title="Close Sale Tab"
+        message={closeTargetHasItems
+          ? `This tab has ${tabs[closeTarget!]?.cart.length} item(s) in the cart. Close it and discard the cart?`
+          : 'Close this empty sale tab?'}
+        confirmLabel={closeTargetHasItems ? 'Discard & Close' : 'Close'}
+        onConfirm={confirmCloseTab}
+        onCancel={cancelCloseTab}
+      />
     </div>
   );
 }

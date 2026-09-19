@@ -43,7 +43,7 @@ export function InventoryPage() {
                 WHERE p.is_active = 1`;
     const params: unknown[] = [];
     if (search.trim()) {
-      sql += ` AND (${normalizeArabicSql('p.name')} LIKE $1 OR ${normalizeArabicSql('p.sku')} LIKE $1 OR ${normalizeArabicSql('p.barcode')} LIKE $1)`;
+      sql += ` AND (${normalizeArabicSql('p.name')} LIKE $1 OR ${normalizeArabicSql('p.sku')} LIKE $1 OR ${normalizeArabicSql('p.barcode')} LIKE $1 OR ${normalizeArabicSql('p.color')} LIKE $1 OR ${normalizeArabicSql('p.size')} LIKE $1)`;
       params.push(arabicSearchPattern(search));
     }
     sql += ` ORDER BY p.name`;

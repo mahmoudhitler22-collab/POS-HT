@@ -67,7 +67,7 @@ export function PosPage() {
                 (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variant_count,
                 COALESCE((SELECT SUM(pv.quantity) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1), 0) AS variant_total_stock
            FROM products p
-           WHERE p.is_active = 1 AND (${normalizeArabicSql('p.name')} LIKE $1 OR ${normalizeArabicSql('p.sku')} LIKE $1 OR ${normalizeArabicSql('p.barcode')} LIKE $1)
+           WHERE p.is_active = 1 AND (${normalizeArabicSql('p.name')} LIKE $1 OR ${normalizeArabicSql('p.sku')} LIKE $1 OR ${normalizeArabicSql('p.barcode')} LIKE $1 OR ${normalizeArabicSql('p.color')} LIKE $1 OR ${normalizeArabicSql('p.size')} LIKE $1)
            ORDER BY p.name LIMIT 20`,
         [arabicSearchPattern(search)]
       );

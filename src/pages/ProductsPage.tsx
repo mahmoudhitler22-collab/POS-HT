@@ -73,7 +73,7 @@ export function ProductsPage() {
     }
 
     if (search.trim()) {
-      sql += ` AND (${normalizeArabicSql('p.name')} LIKE $${paramIdx} OR ${normalizeArabicSql('p.sku')} LIKE $${paramIdx} OR ${normalizeArabicSql('p.barcode')} LIKE $${paramIdx})`;
+      sql += ` AND (${normalizeArabicSql('p.name')} LIKE ${paramIdx} OR ${normalizeArabicSql('p.sku')} LIKE ${paramIdx} OR ${normalizeArabicSql('p.barcode')} LIKE ${paramIdx} OR ${normalizeArabicSql('p.color')} LIKE ${paramIdx} OR ${normalizeArabicSql('p.size')} LIKE ${paramIdx})`;
       params.push(arabicSearchPattern(search));
       paramIdx++;
     }

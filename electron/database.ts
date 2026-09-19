@@ -108,6 +108,10 @@ function applyIncrementalMigrations(currentVersion: number): void {
     db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('loyalty_points_per_1000_egp', '10')").run();
     db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('max_discount_percentage', '20')").run();
   }
+
+  if (currentVersion < 4 && !columnExists('users', 'must_change_password')) {
+    db.exec('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0');
+  }
 }
 
 function tableExists(tableName: string): boolean {
@@ -153,6 +157,7 @@ async function runMigrations(): Promise<void> {
       // tables/columns are preserved), then record the current version.
       db.exec(SCHEMA_SQL);
       db.exec(SEED_SQL);
+      applyIncrementalMigrations(0);
       seedOwnerAccount();
       setSchemaVersion(SCHEMA_VERSION);
       console.log('[Database] Bootstrapped migration metadata on existing database at version', SCHEMA_VERSION);
@@ -199,34 +204,46 @@ export async function createBackup(label?: string): Promise<string> {
   return backupPath;
 }
 
+export async function backupTo(destinationPath: string): Promise<void> {
+  if (!db) throw new Error('Database not initialized');
+  await db.backup(destinationPath);
+}
+
 export async function restoreFromBackup(backupPath: string): Promise<void> {
   const verifiedBackupPath = getManagedBackupPath(backupPath);
+  const dbPath = getDatabasePath();
+  const safetyPath = dbPath + '.pre_restore';
 
-  // Close current database
+  // Capture a consistent pre-restore snapshot before closing the WAL database.
   if (db) {
+    await db.backup(safetyPath);
     db.close();
     db = null;
-  }
-
-  const dbPath = getDatabasePath();
-
-  // Create a safety backup before restore
-  if (fs.existsSync(dbPath)) {
-    const safetyPath = dbPath + '.pre_restore';
+  } else if (fs.existsSync(dbPath)) {
     fs.copyFileSync(dbPath, safetyPath);
   }
 
-  // Copy backup file to database location
-  fs.copyFileSync(verifiedBackupPath, dbPath);
-
-  // Reopen
-  db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.pragma('busy_timeout = 5000');
-
-  // Run migrations on restored data
-  await runMigrations();
+  try {
+    fs.copyFileSync(verifiedBackupPath, dbPath);
+    db = new Database(dbPath);
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    db.pragma('busy_timeout = 5000');
+    await runMigrations();
+  } catch (err) {
+    if (db) {
+      try { db.close(); } catch { /* best-effort */ }
+      db = null;
+    }
+    if (fs.existsSync(safetyPath)) {
+      fs.copyFileSync(safetyPath, dbPath);
+      db = new Database(dbPath);
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+      db.pragma('busy_timeout = 5000');
+    }
+    throw new Error(`Restore failed; the previous database was restored. ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   console.log('[Database] Restore complete');
 }

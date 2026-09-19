@@ -4,7 +4,7 @@
  * common diacritics and Arabic digit variants.
  */
 export function normalizeArabicSearch(value: string): string {
-  return value
+  return normalizeLocalizedNumber(value)
     .normalize('NFKD')
     .replace(/[\u064B-\u065F\u0670]/g, '')
     .replace(/[أإآٱ]/g, 'ا')
@@ -12,8 +12,6 @@ export function normalizeArabicSearch(value: string): string {
     .replace(/ة/g, 'ه')
     .replace(/ؤ/g, 'و')
     .replace(/ئ/g, 'ي')
-    .replace(/[٠-٩]/g, (digit) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
-    .replace(/[۰-۹]/g, (digit) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)))
     .toLocaleLowerCase()
     .trim();
 }
@@ -32,10 +30,12 @@ export function normalizeArabicSql(column: string): string {
   for (const [from, to] of [
     ['أ', 'ا'], ['إ', 'ا'], ['آ', 'ا'], ['ٱ', 'ا'], ['ى', 'ي'],
     ['ة', 'ه'], ['ؤ', 'و'], ['ئ', 'ي'], ['ـ', ''],
-    ['َ', ''], ['ً', ''], ['ُ', ''], ['ٌ', ''], ['ِ', ''], ['ٍ', ''], ['ْ', ''], ['ّ', ''],
+    ['َ', ''], ['ً', ''], ['ُ', ''], ['ٌ', ''], ['ِ', ''], ['ٍ', ''], ['ْ', ''], ['ّ', ''], ['ٰ', ''],
     ['٠', '0'], ['١', '1'], ['٢', '2'], ['٣', '3'], ['٤', '4'], ['٥', '5'], ['٦', '6'], ['٧', '7'], ['٨', '8'], ['٩', '9'],
+    ['۰', '0'], ['۱', '1'], ['۲', '2'], ['۳', '3'], ['۴', '4'], ['۵', '5'], ['۶', '6'], ['۷', '7'], ['۸', '8'], ['۹', '9'],
   ] as const) {
     expression = `REPLACE(${expression}, '${from}', '${to}')`;
   }
   return expression;
 }
+import { normalizeLocalizedNumber } from './money';

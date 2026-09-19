@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
-import { query, execute, isRunningInElectron, getAuthSessionId } from '@/db/client';
+import { query, execute, isRunningInElectron, getAuthSessionId, deleteUser } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { logAudit } from '@/lib/audit';
 import { hashPassword } from '@/lib/crypto';
 import {
   ALL_PERMISSIONS, OWNER_PERMISSIONS, MANAGER_PERMISSIONS,
   CASHIER_PERMISSIONS, INVENTORY_PERMISSIONS,
-  getRolePermissions, parsePermissions, type PermissionSet
+  parsePermissions, type PermissionSet
 } from '@/lib/permissions';
 import { toast } from '@/components/ui/Toast';
 import { Button } from '@/components/ui/Button';
@@ -15,7 +15,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Modal, ConfirmDialog } from '@/components/ui/Modal';
 import type { User } from '@/types';
 import {
-  Plus, Pencil, Trash2, UserCog, Shield, Key, Lock, Check
+  Plus, Pencil, Trash2, UserCog, Shield, Lock, Check
 } from 'lucide-react';
 
 // Hash a password using the main process (scrypt) when running in Electron,
@@ -58,6 +58,7 @@ export function UsersPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<UserRow | null>(null);
+  const [disableTarget, setDisableTarget] = useState<UserRow | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<UserRow | null>(null);
 
   const load = useCallback(async () => {
@@ -69,18 +70,30 @@ export function UsersPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const handleDelete = async () => {
-    if (!deleteTarget) return;
-    if (deleteTarget.id === currentUser?.id) {
+  const handleDisable = async () => {
+    if (!disableTarget) return;
+    if (disableTarget.id === currentUser?.id) {
       toast('error', 'You cannot delete your own account');
-      setDeleteTarget(null);
+      setDisableTarget(null);
       return;
     }
-    await execute('UPDATE users SET is_active = 0 WHERE id = $1', [deleteTarget.id]);
-    await logAudit({ user_id: currentUser?.id ?? null, action: 'user_disable', entity_type: 'user', entity_id: deleteTarget.id });
+    await execute('UPDATE users SET is_active = 0 WHERE id = $1', [disableTarget.id]);
+    await logAudit({ user_id: currentUser?.id ?? null, action: 'user_disable', entity_type: 'user', entity_id: disableTarget.id });
     toast('success', 'User disabled');
-    setDeleteTarget(null);
+    setDisableTarget(null);
     load();
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      await deleteUser(deleteTarget.id);
+      toast('success', `User "${deleteTarget.display_name}" deleted`);
+      setDeleteTarget(null);
+      load();
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'Failed to delete user');
+    }
   };
 
   return (
@@ -136,18 +149,23 @@ export function UsersPage() {
                         <button onClick={() => { setEditing(u); setShowModal(true); }} className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700">
                           <Pencil size={16} />
                         </button>
-                        {u.id !== currentUser?.id && u.is_active === 1 && (
-                          <button onClick={() => setDeleteTarget(u)} className="p-1.5 rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-600">
+                        {u.id !== currentUser?.id && u.role_name !== 'owner' && u.is_active === 1 && (
+                          <button onClick={() => setDisableTarget(u)} className="p-1.5 rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-600" title="Disable user">
                             <Lock size={16} />
                           </button>
                         )}
-                        {u.id !== currentUser?.id && u.is_active === 0 && (
+                        {u.id !== currentUser?.id && u.role_name !== 'owner' && u.is_active === 0 && (
                           <button onClick={async () => {
                             await execute('UPDATE users SET is_active = 1 WHERE id = $1', [u.id]);
                             toast('success', 'User re-enabled');
                             load();
                           }} className="p-1.5 rounded-lg text-slate-500 hover:bg-emerald-50 hover:text-emerald-600">
                             <Check size={16} />
+                          </button>
+                        )}
+                        {u.id !== currentUser?.id && u.role_name !== 'owner' && (
+                          <button onClick={() => setDeleteTarget(u)} className="p-1.5 rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-600" title="Delete permanently">
+                            <Trash2 size={16} />
                           </button>
                         )}
                       </div>
@@ -169,10 +187,18 @@ export function UsersPage() {
       )}
 
       <ConfirmDialog
-        open={!!deleteTarget}
+        open={!!disableTarget}
         title="Disable User"
-        message={`Disable "${deleteTarget?.display_name}"? They will no longer be able to log in.`}
+        message={`Disable "${disableTarget?.display_name}"? They will no longer be able to log in.`}
         confirmLabel="Disable"
+        onConfirm={handleDisable}
+        onCancel={() => setDisableTarget(null)}
+      />
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete User Permanently"
+        message={`Permanently delete "${deleteTarget?.display_name}"? This cannot be undone. Users with recorded activity must be disabled instead.`}
+        confirmLabel="Delete"
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
       />

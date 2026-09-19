@@ -3,35 +3,44 @@ import { getAuthSessionId, query, transaction } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { useSettings } from '@/context/SettingsContext';
 import { logAudit } from '@/lib/audit';
-import { formatEgp, formatQuantity, toPiasters } from '@/lib/money';
+import { formatEgp, formatQuantity, parseLocalizedNumber, toPiasters } from '@/lib/money';
 import { arabicSearchPattern, normalizeArabicSql } from '@/lib/search';
 import { toast } from '@/components/ui/Toast';
 import { Button } from '@/components/ui/Button';
-import { Input, Select } from '@/components/ui/Input';
+import { Select } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { Receipt } from '@/components/Receipt';
-import type { Product, CartItem, Sale } from '@/types';
+import type { Product, ProductVariant, CartItem, Sale } from '@/types';
 import {
   Search, Plus, Minus, Trash2, ShoppingCart, Barcode,
-  CreditCard, Banknote, Smartphone, Wallet, X, Printer, User, Check
+  CreditCard, Banknote, Smartphone, Wallet, Check
 } from 'lucide-react';
+
+type PosProduct = Product & { variant_count: number; variant_total_stock: number };
+
+const cartItemKey = (productId: number, variantId: number | null) =>
+  `${productId}:${variantId ?? 'product'}`;
 
 export function PosPage() {
   const { user, hasPermission } = useAuth();
   const { get } = useSettings();
   const [search, setSearch] = useState('');
-  const [searchResults, setSearchResults] = useState<Product[]>([]);
+  const [searchResults, setSearchResults] = useState<PosProduct[]>([]);
+  const [variantProduct, setVariantProduct] = useState<PosProduct | null>(null);
+  const [variantChoices, setVariantChoices] = useState<ProductVariant[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customerId, setCustomerId] = useState<string>('');
   const [customers, setCustomers] = useState<{ id: number; name: string; phone: string | null }[]>([]);
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [isCompletingSale, setIsCompletingSale] = useState(false);
   const [completedSale, setCompletedSale] = useState<Sale | null>(null);
   const [globalDiscountType, setGlobalDiscountType] = useState<'percentage' | 'fixed' | 'none'>('none');
   const [globalDiscountValue, setGlobalDiscountValue] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
   const barcodeBufferRef = useRef<string>('');
   const lastKeyTimeRef = useRef<number>(0);
+  const completingSaleRef = useRef(false);
 
   const paymentMethods: string[] = (() => {
     try { return JSON.parse(get('payment_methods', '["Cash","Card / Visa","Instapay","Other"]')); }
@@ -53,8 +62,13 @@ export function PosPage() {
       return;
     }
     const timer = setTimeout(async () => {
-      const res = await query<Product>(
-        `SELECT * FROM products WHERE is_active = 1 AND (${normalizeArabicSql('name')} LIKE $1 OR ${normalizeArabicSql('sku')} LIKE $1 OR ${normalizeArabicSql('barcode')} LIKE $1) ORDER BY name LIMIT 20`,
+      const res = await query<PosProduct>(
+        `SELECT p.*,
+                (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variant_count,
+                COALESCE((SELECT SUM(pv.quantity) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1), 0) AS variant_total_stock
+           FROM products p
+           WHERE p.is_active = 1 AND (${normalizeArabicSql('p.name')} LIKE $1 OR ${normalizeArabicSql('p.sku')} LIKE $1 OR ${normalizeArabicSql('p.barcode')} LIKE $1)
+           ORDER BY p.name LIMIT 20`,
         [arabicSearchPattern(search)]
       );
       setSearchResults(res.rows);
@@ -96,23 +110,43 @@ export function PosPage() {
   }, [search]);
 
   const handleBarcodeScan = async (code: string) => {
-    const res = await query<Product>(
-      'SELECT * FROM products WHERE is_active = 1 AND barcode = $1',
+    const variantRes = await query<ProductVariant & { product_name: string; product_sku: string | null; product_barcode: string | null; product_selling_price: number; product_purchase_cost: number; product_min_stock_level: number }>(
+      `SELECT pv.*, p.name AS product_name, p.sku AS product_sku, p.barcode AS product_barcode,
+              p.selling_price AS product_selling_price, p.purchase_cost AS product_purchase_cost,
+              p.min_stock_level AS product_min_stock_level
+         FROM product_variants pv
+         JOIN products p ON p.id = pv.product_id
+        WHERE pv.is_active = 1 AND p.is_active = 1 AND pv.barcode = $1`,
       [code]
     );
-    if (res.rows.length > 0) {
-      addToCart(res.rows[0]);
+    if (variantRes.rows.length > 0) {
+      const variant = variantRes.rows[0];
+      addToCart({
+        id: variant.product_id,
+        name: variant.product_name,
+        sku: variant.product_sku,
+        barcode: variant.product_barcode,
+        selling_price: variant.product_selling_price,
+        purchase_cost: variant.product_purchase_cost,
+        min_stock_level: variant.product_min_stock_level,
+        quantity: 0,
+        variant_count: 1,
+        variant_total_stock: variant.quantity,
+      } as PosProduct, variant);
       setSearch('');
       setSearchResults([]);
-      toast('success', `Added: ${res.rows[0].name}`);
+      toast('success', `Added: ${variant.product_name}`);
     } else {
       // Try as SKU
-      const skuRes = await query<Product>(
-        'SELECT * FROM products WHERE is_active = 1 AND sku = $1',
+      const skuRes = await query<PosProduct>(
+        `SELECT p.*,
+                (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variant_count,
+                COALESCE((SELECT SUM(pv.quantity) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1), 0) AS variant_total_stock
+           FROM products p WHERE p.is_active = 1 AND (p.barcode = $1 OR p.sku = $1)`,
         [code]
       );
       if (skuRes.rows.length > 0) {
-        addToCart(skuRes.rows[0]);
+        void selectProduct(skuRes.rows[0]);
         setSearch('');
         setSearchResults([]);
         toast('success', `Added: ${skuRes.rows[0].name}`);
@@ -122,40 +156,58 @@ export function PosPage() {
     }
   };
 
-  const addToCart = (product: Product) => {
-    if (!allowNegativeStock && product.quantity <= 0) {
+  const selectProduct = async (product: PosProduct) => {
+    if (Number(product.variant_count) > 0) {
+      const variants = await query<ProductVariant>(
+        'SELECT * FROM product_variants WHERE product_id = $1 AND is_active = 1 ORDER BY color, size',
+        [product.id]
+      );
+      setVariantProduct(product);
+      setVariantChoices(variants.rows);
+      return;
+    }
+    addToCart(product);
+  };
+
+  const addToCart = (product: Product, variant: ProductVariant | null = null) => {
+    const availableStock = variant?.quantity ?? product.quantity;
+    if (!allowNegativeStock && availableStock <= 0) {
       toast('error', `${product.name} is out of stock`);
       return;
     }
+    const variantLabel = variant ? [variant.color, variant.size].filter(Boolean).join(' / ') : null;
+    const key = cartItemKey(product.id, variant?.id ?? null);
     setCart((prev) => {
-      const existing = prev.find((item) => item.product_id === product.id);
+      const existing = prev.find((item) => cartItemKey(item.product_id, item.variant_id) === key);
       if (existing) {
-        if (!allowNegativeStock && existing.quantity + 1 > product.quantity) {
-          toast('error', `Only ${formatQuantity(product.quantity)} in stock`);
+        if (!allowNegativeStock && existing.quantity + 1 > availableStock) {
+          toast('error', `Only ${formatQuantity(availableStock)} in stock`);
           return prev;
         }
         return prev.map((item) =>
-          item.product_id === product.id ? { ...item, quantity: item.quantity + 1 } : item
+          cartItemKey(item.product_id, item.variant_id) === key ? { ...item, quantity: item.quantity + 1 } : item
         );
       }
       return [...prev, {
         product_id: product.id,
-        name: product.name,
-        barcode: product.barcode,
-        unit_price: product.selling_price,
+        variant_id: variant?.id ?? null,
+        variant_label: variantLabel,
+        name: variantLabel ? `${product.name} — ${variantLabel}` : product.name,
+        barcode: variant?.barcode ?? product.barcode,
+        unit_price: variant?.selling_price ?? product.selling_price,
         quantity: 1,
         discount_type: null,
         discount_value: 0,
-        available_stock: product.quantity,
-        cost: product.purchase_cost ?? 0,
+        available_stock: availableStock,
+        cost: variant?.purchase_cost ?? product.purchase_cost ?? 0,
       }];
     });
   };
 
-  const updateQuantity = (productId: number, delta: number) => {
+  const updateQuantity = (itemKey: string, delta: number) => {
     setCart((prev) => {
       return prev.map((item) => {
-        if (item.product_id !== productId) return item;
+        if (cartItemKey(item.product_id, item.variant_id) !== itemKey) return item;
         const newQty = item.quantity + delta;
         if (newQty <= 0) return item;
         if (!allowNegativeStock && newQty > item.available_stock) {
@@ -167,9 +219,9 @@ export function PosPage() {
     });
   };
 
-  const setQuantity = (productId: number, qty: number) => {
+  const setQuantity = (itemKey: string, qty: number) => {
     setCart((prev) => prev.map((item) => {
-      if (item.product_id !== productId) return item;
+      if (cartItemKey(item.product_id, item.variant_id) !== itemKey) return item;
       if (qty <= 0) return item;
       if (!allowNegativeStock && qty > item.available_stock) {
         toast('error', `Only ${formatQuantity(item.available_stock)} in stock`);
@@ -179,13 +231,13 @@ export function PosPage() {
     }));
   };
 
-  const removeItem = (productId: number) => {
-    setCart((prev) => prev.filter((item) => item.product_id !== productId));
+  const removeItem = (itemKey: string) => {
+    setCart((prev) => prev.filter((item) => cartItemKey(item.product_id, item.variant_id) !== itemKey));
   };
 
-  const setItemDiscount = (productId: number, type: 'percentage' | 'fixed' | null, value: number) => {
+  const setItemDiscount = (itemKey: string, type: 'percentage' | 'fixed' | null, value: number) => {
     setCart((prev) => prev.map((item) =>
-      item.product_id === productId
+      cartItemKey(item.product_id, item.variant_id) === itemKey
         ? { ...item, discount_type: type, discount_value: value }
         : item
     ));
@@ -210,7 +262,7 @@ export function PosPage() {
 
   let globalDiscountAmount = 0;
   if (globalDiscountType === 'percentage' && globalDiscountValue) {
-    globalDiscountAmount = Math.round(totalAfterItemDiscounts * parseFloat(globalDiscountValue) / 100);
+    globalDiscountAmount = Math.round(totalAfterItemDiscounts * parseLocalizedNumber(globalDiscountValue) / 100);
   } else if (globalDiscountType === 'fixed' && globalDiscountValue) {
     globalDiscountAmount = Math.min(toPiasters(globalDiscountValue), totalAfterItemDiscounts);
   }
@@ -237,9 +289,10 @@ export function PosPage() {
   const totalDiscount = itemDiscounts + globalDiscountAmount;
   const total = subtotal - totalDiscount;
 
-  const maxDiscountPct = parseInt(get('max_discount_percentage', '20'), 10);
+  const maxDiscountPct = parseLocalizedNumber(get('max_discount_percentage', '20'));
 
   const completeSale = async () => {
+    if (completingSaleRef.current) return;
     if (cart.length === 0) {
       toast('error', 'Cart is empty');
       return;
@@ -247,7 +300,7 @@ export function PosPage() {
 
     // Validate discount limits
     if (globalDiscountType === 'percentage' && globalDiscountValue) {
-      const pct = parseFloat(globalDiscountValue);
+      const pct = parseLocalizedNumber(globalDiscountValue);
       if (pct > maxDiscountPct) {
         toast('error', `Maximum discount is ${maxDiscountPct}%`);
         return;
@@ -260,6 +313,8 @@ export function PosPage() {
       }
     }
 
+    completingSaleRef.current = true;
+    setIsCompletingSale(true);
     try {
       let sale: Sale;
       if (window.electronAPI) {
@@ -268,10 +323,11 @@ export function PosPage() {
           paymentMethod,
           globalDiscount: {
             type: globalDiscountType,
-            value: parseFloat(globalDiscountValue) || 0,
+            value: parseLocalizedNumber(globalDiscountValue) || 0,
           },
           items: cart.map((item) => ({
             productId: item.product_id,
+            variantId: item.variant_id,
             quantity: item.quantity,
             discountType: item.discount_type,
             discountValue: item.discount_value,
@@ -302,26 +358,36 @@ export function PosPage() {
         // Create sale items + update inventory
         for (const item of cartWithTotals) {
           await tx.exec(
-            `INSERT INTO sale_items (sale_id, product_id, product_name, unit_price, quantity, discount_type, discount_value, discount_amount, final_price, cost_at_sale, line_total)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            `INSERT INTO sale_items (sale_id, product_id, variant_id, product_name, unit_price, quantity, discount_type, discount_value, discount_amount, final_price, cost_at_sale, line_total)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
             [
-              saleId, item.product_id, item.name, item.unit_price, item.quantity,
+              saleId, item.product_id, item.variant_id, item.name, item.unit_price, item.quantity,
               item.discount_type, toPiasters(item.discount_value), item.discountAmount,
               item.finalPrice, item.cost, item.lineTotal
             ]
           );
 
-          // Get current stock
-          const prodRes = await tx.query<{ quantity: number }>('SELECT quantity FROM products WHERE id = $1', [item.product_id]);
-          const prevQty = prodRes.rows[0].quantity;
+          // Variants hold their own inventory; regular products use the parent quantity.
+          const stockRes = item.variant_id === null
+            ? await tx.query<{ quantity: number }>('SELECT quantity FROM products WHERE id = $1', [item.product_id])
+            : await tx.query<{ quantity: number }>('SELECT quantity FROM product_variants WHERE id = $1 AND product_id = $2', [item.variant_id, item.product_id]);
+          const prevQty = stockRes.rows[0]?.quantity;
+          if (prevQty === undefined) throw new Error(`Stock record for ${item.name} was not found`);
+          if (!allowNegativeStock && prevQty < item.quantity) {
+            throw new Error(`Insufficient stock for ${item.name}`);
+          }
           const newQty = prevQty - item.quantity;
 
-          await tx.exec('UPDATE products SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [newQty, item.product_id]);
+          if (item.variant_id === null) {
+            await tx.exec('UPDATE products SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [newQty, item.product_id]);
+          } else {
+            await tx.exec('UPDATE product_variants SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [newQty, item.variant_id]);
+          }
 
           await tx.exec(
-            `INSERT INTO inventory_movements (product_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
-             VALUES ($1, $2, $3, $4, 'Sale', 'sale', $5, $6)`,
-            [item.product_id, -item.quantity, prevQty, newQty, saleId, user!.id]
+            `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
+             VALUES ($1, $2, $3, $4, $5, 'Sale', 'sale', $6, $7)`,
+            [item.product_id, item.variant_id, -item.quantity, prevQty, newQty, saleId, user!.id]
           );
         }
 
@@ -345,7 +411,7 @@ export function PosPage() {
 
           // Loyalty points: 10 points per EGP 1,000 (whole units only)
           if (get('loyalty_enabled', '0') === '1') {
-            const pointsPer1000 = parseInt(get('loyalty_points_per_1000_egp', '10'), 10);
+            const pointsPer1000 = parseLocalizedNumber(get('loyalty_points_per_1000_egp', '10'));
             const totalEgp = Math.floor(total / 100); // piasters to EGP
             const points = Math.floor(totalEgp / 1000) * pointsPer1000;
             if (points > 0) {
@@ -383,6 +449,9 @@ export function PosPage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Sale failed';
       toast('error', `Sale failed: ${msg}`);
+    } finally {
+      completingSaleRef.current = false;
+      setIsCompletingSale(false);
     }
   };
 
@@ -429,17 +498,18 @@ export function PosPage() {
               {searchResults.map((p) => (
                 <button
                   key={p.id}
-                  onClick={() => addToCart(p)}
+                  onClick={() => { void selectProduct(p); }}
                   className="card p-4 text-left hover:border-teal-400 hover:shadow-md transition-all group"
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div className="font-medium text-slate-900 group-hover:text-teal-600 transition-colors">{p.name}</div>
-                    {p.quantity <= 0 && <span className="text-xs text-red-500 font-medium">Out</span>}
-                    {p.quantity > 0 && p.quantity <= p.min_stock_level && <span className="text-xs text-amber-500 font-medium">Low</span>}
+                    {Number(p.variant_count) > 0 ? <span className="text-xs text-teal-600 font-medium">Variants</span> :
+                      p.quantity <= 0 ? <span className="text-xs text-red-500 font-medium">Out</span> :
+                        p.quantity <= p.min_stock_level && <span className="text-xs text-amber-500 font-medium">Low</span>}
                   </div>
                   <div className="flex items-center justify-between">
                     <div className="text-lg font-bold text-slate-900">{formatEgp(p.selling_price)}</div>
-                    <div className="text-xs text-slate-400">Stock: {formatQuantity(p.quantity)}</div>
+                    <div className="text-xs text-slate-400">Stock: {formatQuantity(Number(p.variant_count) > 0 ? Number(p.variant_total_stock) : p.quantity)}</div>
                   </div>
                   {(p.size || p.color) && (
                     <div className="flex gap-2 mt-1.5">
@@ -483,28 +553,29 @@ export function PosPage() {
           ) : (
             <div className="divide-y divide-slate-100">
               {cartWithTotals.map((item) => (
-                <div key={item.product_id} className="p-4">
+                <div key={cartItemKey(item.product_id, item.variant_id)} className="p-4">
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-slate-900 text-sm truncate">{item.name}</p>
                       <p className="text-xs text-slate-400">{formatEgp(item.unit_price)} each</p>
                     </div>
-                    <button onClick={() => removeItem(item.product_id)} className="p-1 text-slate-400 hover:text-red-500">
+                    <button onClick={() => removeItem(cartItemKey(item.product_id, item.variant_id))} className="p-1 text-slate-400 hover:text-red-500">
                       <Trash2 size={16} />
                     </button>
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="flex items-center border border-slate-200 rounded-lg">
-                      <button onClick={() => updateQuantity(item.product_id, -1)} className="p-1.5 text-slate-500 hover:bg-slate-100 rounded-l-lg">
+                      <button onClick={() => updateQuantity(cartItemKey(item.product_id, item.variant_id), -1)} className="p-1.5 text-slate-500 hover:bg-slate-100 rounded-l-lg">
                         <Minus size={14} />
                       </button>
                       <input
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         value={item.quantity}
-                        onChange={(e) => setQuantity(item.product_id, parseFloat(e.target.value) || 1)}
+                        onChange={(e) => setQuantity(cartItemKey(item.product_id, item.variant_id), parseLocalizedNumber(e.target.value) || 1)}
                         className="w-12 text-center text-sm border-0 focus:outline-none py-1.5"
                       />
-                      <button onClick={() => updateQuantity(item.product_id, 1)} className="p-1.5 text-slate-500 hover:bg-slate-100 rounded-r-lg">
+                      <button onClick={() => updateQuantity(cartItemKey(item.product_id, item.variant_id), 1)} className="p-1.5 text-slate-500 hover:bg-slate-100 rounded-r-lg">
                         <Plus size={14} />
                       </button>
                     </div>
@@ -521,7 +592,7 @@ export function PosPage() {
                         value={item.discount_type || 'none'}
                         onChange={(e) => {
                           const type = e.target.value === 'none' ? null : e.target.value as 'percentage' | 'fixed';
-                          setItemDiscount(item.product_id, type, type ? item.discount_value : 0);
+                          setItemDiscount(cartItemKey(item.product_id, item.variant_id), type, type ? item.discount_value : 0);
                         }}
                         className="text-xs border border-slate-200 rounded px-1.5 py-1 bg-white"
                       >
@@ -531,9 +602,10 @@ export function PosPage() {
                       </select>
                       {item.discount_type && (
                         <input
-                          type="number"
+                          type="text"
+                          inputMode="decimal"
                           value={item.discount_value || ''}
-                          onChange={(e) => setItemDiscount(item.product_id, item.discount_type, parseFloat(e.target.value) || 0)}
+                          onChange={(e) => setItemDiscount(cartItemKey(item.product_id, item.variant_id), item.discount_type, parseLocalizedNumber(e.target.value) || 0)}
                           placeholder={item.discount_type === 'percentage' ? '%' : 'EGP'}
                           className="w-20 text-xs border border-slate-200 rounded px-2 py-1"
                         />
@@ -562,7 +634,8 @@ export function PosPage() {
                 </select>
                 {globalDiscountType !== 'none' && (
                   <input
-                    type="number"
+                    type="text"
+                    inputMode="decimal"
                     value={globalDiscountValue}
                     onChange={(e) => setGlobalDiscountValue(e.target.value)}
                     placeholder={globalDiscountType === 'percentage' ? '%' : 'EGP'}
@@ -594,6 +667,39 @@ export function PosPage() {
         )}
       </div>
 
+      {/* A variant is its own sellable inventory record. */}
+      <Modal
+        open={variantProduct !== null}
+        onClose={() => { setVariantProduct(null); setVariantChoices([]); }}
+        title={variantProduct ? `Select variant — ${variantProduct.name}` : 'Select variant'}
+        size="md"
+      >
+        <div className="grid grid-cols-2 gap-3">
+          {variantChoices.map((variant) => {
+            const label = [variant.color, variant.size].filter(Boolean).join(' / ');
+            const price = variant.selling_price ?? variantProduct?.selling_price ?? 0;
+            return (
+              <button
+                key={variant.id}
+                disabled={!allowNegativeStock && variant.quantity <= 0}
+                onClick={() => {
+                  if (variantProduct) addToCart(variantProduct, variant);
+                  setVariantProduct(null);
+                  setVariantChoices([]);
+                  setSearch('');
+                  setSearchResults([]);
+                }}
+                className="rounded-lg border border-slate-200 p-3 text-left transition-colors hover:border-teal-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <p className="font-medium text-slate-900">{label || 'Default variant'}</p>
+                <p className="mt-1 text-sm font-semibold text-slate-700">{formatEgp(price)}</p>
+                <p className="mt-1 text-xs text-slate-500">Stock: {formatQuantity(variant.quantity)}</p>
+              </button>
+            );
+          })}
+        </div>
+      </Modal>
+
       {/* Payment Modal */}
       <Modal
         open={showPaymentModal}
@@ -603,8 +709,8 @@ export function PosPage() {
         footer={
           <>
             <Button variant="outline" onClick={() => setShowPaymentModal(false)}>Cancel</Button>
-            <Button variant="success" onClick={completeSale}>
-              <Check size={18} /> Complete Sale
+            <Button variant="success" onClick={completeSale} disabled={isCompletingSale}>
+              <Check size={18} /> {isCompletingSale ? 'Processing…' : 'Complete Sale'}
             </Button>
           </>
         }

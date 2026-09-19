@@ -12,7 +12,7 @@ import { Modal, ConfirmDialog } from '@/components/ui/Modal';
 import { useSettings } from '@/context/SettingsContext';
 import type { Customer } from '@/types';
 import {
-  Plus, Search, Pencil, Trash2, Users, Phone, Star, ShoppingBag, X
+  Plus, Search, Pencil, Trash2, Users, Star
 } from 'lucide-react';
 
 export function CustomersPage() {

@@ -2,16 +2,15 @@ import { useState, useEffect, useCallback } from 'react';
 import { getAuthSessionId, query, transaction } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { logAudit } from '@/lib/audit';
-import { formatEgp, formatQuantity } from '@/lib/money';
+import { formatEgp, formatQuantity, parseLocalizedNumber } from '@/lib/money';
 import { arabicSearchPattern, normalizeArabicSql } from '@/lib/search';
 import { toast } from '@/components/ui/Toast';
 import { Button } from '@/components/ui/Button';
-import { Input, Textarea } from '@/components/ui/Input';
-import { Badge } from '@/components/ui/Badge';
-import { Modal, ConfirmDialog } from '@/components/ui/Modal';
+import { Textarea } from '@/components/ui/Input';
+import { ConfirmDialog } from '@/components/ui/Modal';
 import type { Sale, SaleItem, Refund } from '@/types';
 import {
-  Undo2, Search, Receipt, AlertTriangle, Check, ArrowLeft
+  Undo2, Search, Receipt, ArrowLeft
 } from 'lucide-react';
 
 export function RefundsPage() {
@@ -182,21 +181,28 @@ export function RefundsPage() {
         for (const { item, sel, refundAmount } of refundLines) {
 
           await tx.exec(
-            `INSERT INTO refund_items (refund_id, sale_item_id, product_id, product_name, quantity, unit_price, refund_amount)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [refundId, item.id, item.product_id, item.product_name, sel.qty, item.unit_price, refundAmount]
+            `INSERT INTO refund_items (refund_id, sale_item_id, product_id, variant_id, product_name, quantity, unit_price, refund_amount)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [refundId, item.id, item.product_id, item.variant_id, item.product_name, sel.qty, item.unit_price, refundAmount]
           );
 
-          // Restore inventory
-          const prodRes = await tx.query<{ quantity: number }>('SELECT quantity FROM products WHERE id = $1', [item.product_id]);
-          const prevQty = prodRes.rows[0].quantity;
+          // Restore the same inventory record that was reduced by the sale.
+          const stockRes = item.variant_id === null
+            ? await tx.query<{ quantity: number }>('SELECT quantity FROM products WHERE id = $1', [item.product_id])
+            : await tx.query<{ quantity: number }>('SELECT quantity FROM product_variants WHERE id = $1 AND product_id = $2', [item.variant_id, item.product_id]);
+          const prevQty = stockRes.rows[0]?.quantity;
+          if (prevQty === undefined) throw new Error(`Stock record for ${item.product_name} was not found`);
           const newQty = prevQty + sel.qty;
-          await tx.exec('UPDATE products SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [newQty, item.product_id]);
+          if (item.variant_id === null) {
+            await tx.exec('UPDATE products SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [newQty, item.product_id]);
+          } else {
+            await tx.exec('UPDATE product_variants SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [newQty, item.variant_id]);
+          }
 
           await tx.exec(
-            `INSERT INTO inventory_movements (product_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
-             VALUES ($1, $2, $3, $4, 'Refund', 'refund', $5, $6)`,
-            [item.product_id, sel.qty, prevQty, newQty, refundId, user!.id]
+            `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
+             VALUES ($1, $2, $3, $4, $5, 'Refund', 'refund', $6, $7)`,
+            [item.product_id, item.variant_id, sel.qty, prevQty, newQty, refundId, user!.id]
           );
         }
 
@@ -244,7 +250,7 @@ export function RefundsPage() {
       setView('list');
       setSelectedSale(null);
       loadSales();
-    } catch (err) {
+    } catch {
       toast('error', 'Failed to process refund');
     }
   };
@@ -308,13 +314,14 @@ export function RefundsPage() {
                     <div className="flex items-center gap-2">
                       <label className="text-xs text-slate-600">Qty:</label>
                       <input
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         min="0"
                         max={item.refundableQty}
                         step="0.01"
                         value={sel.qty}
                         onChange={(e) => {
-                          const val = Math.min(parseFloat(e.target.value) || 0, item.refundableQty);
+                          const val = Math.min(parseLocalizedNumber(e.target.value) || 0, item.refundableQty);
                           setRefundSelection({ ...refundSelection, [item.id]: { ...sel, qty: val } });
                         }}
                         className="w-20 text-sm border border-slate-200 rounded px-2 py-1"

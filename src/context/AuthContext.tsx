@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
-import { query, execute, setAuthSessionId } from '@/db/client';
+import { query, execute, getAuthSessionId, setAuthSessionId, isInitialOwnerSetupRequired, createInitialOwner } from '@/db/client';
 import { verifyPassword } from '@/lib/crypto';
 import { parsePermissions, type PermissionSet, type Permission } from '@/lib/permissions';
 import type { User } from '@/types';
@@ -7,7 +7,11 @@ import type { User } from '@/types';
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
+  mustChangePassword: boolean;
+  needsInitialOwnerSetup: boolean;
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  setupInitialOwner: (username: string, displayName: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  changeInitialPassword: (password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   hasPermission: (perm: string) => boolean;
 }
@@ -21,9 +25,11 @@ const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [needsInitialOwnerSetup, setNeedsInitialOwnerSetup] = useState(false);
 
   useEffect(() => {
     (async () => {
+      try {
       const storedUserId = localStorage.getItem(STORAGE_KEY);
       const storedSessionId = localStorage.getItem(SESSION_KEY);
       if (storedUserId && storedSessionId) {
@@ -53,7 +59,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
         }
       }
+      if (!isElectron) setNeedsInitialOwnerSetup(await isInitialOwnerSetupRequired());
+      } catch {
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(SESSION_KEY);
+      } finally {
       setLoading(false);
+      }
     })();
   }, []);
 
@@ -124,13 +136,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
+  const changeInitialPassword = async (password: string) => {
+    if (!isElectron) return { success: false, error: 'This action is only available in the desktop application.' };
+    const sessionId = getAuthSessionId();
+    if (sessionId === undefined) return { success: false, error: 'Not authenticated. Please log in again.' };
+    const result = await window.electronAPI.auth.changeInitialPassword(sessionId, password);
+    if (result.success) {
+      setUser((current) => current ? { ...current, must_change_password: 0 } : current);
+    }
+    return result;
+  };
+
+  const setupInitialOwner = async (username: string, displayName: string, password: string) => {
+    const result = await createInitialOwner(username, displayName, password);
+    if (result.success) setNeedsInitialOwnerSetup(false);
+    return result;
+  };
+
   const hasPermission = (perm: string) => {
     if (!user) return false;
     return !!user.permissions[perm as Permission];
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, hasPermission }}>
+    <AuthContext.Provider value={{ user, loading, mustChangePassword: user?.must_change_password === 1, needsInitialOwnerSetup, login, setupInitialOwner, changeInitialPassword, logout, hasPermission }}>
       {children}
     </AuthContext.Provider>
   );
@@ -143,6 +172,7 @@ function mapAuthUser(u: {
   role_id: number;
   role_name: string;
   is_active: number;
+  must_change_password: number;
   permissions: Record<string, boolean>;
   created_at: string;
   updated_at: string;
@@ -154,6 +184,7 @@ function mapAuthUser(u: {
     role_id: u.role_id,
     role_name: u.role_name,
     is_active: u.is_active,
+    must_change_password: u.must_change_password,
     permissions: u.permissions as PermissionSet,
     created_at: u.created_at,
     updated_at: u.updated_at,

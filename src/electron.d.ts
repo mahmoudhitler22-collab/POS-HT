@@ -20,6 +20,7 @@ export interface AuthUser {
   role_id: number;
   role_name: string;
   is_active: number;
+  must_change_password: number;
   permissions: Record<string, boolean>;
   created_at: string;
   updated_at: string;
@@ -28,6 +29,7 @@ export interface AuthUser {
 export interface ElectronAPI {
   auth: {
     login: (username: string, password: string) => Promise<{ success: boolean; error?: string; user?: AuthUser; sessionId?: number }>;
+    changeInitialPassword: (sessionId: number, password: string) => Promise<{ success: boolean; error?: string }>;
     logout: (sessionId: number) => Promise<{ success: boolean; error?: string }>;
     restore: (previousSessionId: number) => Promise<{ success: boolean; sessionId?: number; user?: AuthUser }>;
     hasPermission: (sessionId: number, perm: string) => Promise<{ success: boolean; result: boolean }>;
@@ -38,7 +40,7 @@ export interface ElectronAPI {
       customerId: number | null;
       paymentMethod: string;
       globalDiscount: { type: 'percentage' | 'fixed' | 'none'; value: number };
-      items: Array<{ productId: number; quantity: number; discountType: 'percentage' | 'fixed' | null; discountValue: number }>;
+      items: Array<{ productId: number; variantId: number | null; quantity: number; discountType: 'percentage' | 'fixed' | null; discountValue: number }>;
     }, sessionId?: number) => Promise<{ success: boolean; sale?: { id: number; invoice_number: string; subtotal: number; discount_amount: number; total: number; customer_id: number | null; cashier_id: number; payment_method: string; status: string; notes: null; created_at: string }; error?: string }>;
     processRefund: (request: {
       saleId: number;
@@ -109,6 +111,8 @@ export interface ElectronAPI {
       productId: number | null;
       variants: Array<{ color: string; size: string; quantity: number; is_active: boolean }>;
     }, sessionId?: number) => Promise<{ success: boolean; productId?: number; error?: string }>;
+    deleteProduct: (productId: number, sessionId?: number) => Promise<{ success: boolean; error?: string }>;
+    deleteUser: (userId: number, sessionId?: number) => Promise<{ success: boolean; error?: string }>;
   };
   print: {
     print: (

@@ -7,10 +7,12 @@ import { LanguageToggle } from '@/components/LanguageToggle';
 import { Store, Lock, AlertCircle } from 'lucide-react';
 
 export function LoginPage() {
-  const { login } = useAuth();
+  const { login, needsInitialOwnerSetup, setupInitialOwner } = useAuth();
   const { t } = useLanguage();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [confirmation, setConfirmation] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -18,7 +20,15 @@ export function LoginPage() {
     e.preventDefault();
     setLoading(true);
     setError('');
-    const result = await login(username, password);
+    if (needsInitialOwnerSetup && password !== confirmation) {
+      setError(t('Passwords do not match'));
+      setLoading(false);
+      return;
+    }
+    const setup = needsInitialOwnerSetup
+      ? await setupInitialOwner(username, displayName, password)
+      : { success: true };
+    const result = setup.success ? await login(username, password) : setup;
     if (!result.success) {
       setError(result.error || t('Login failed'));
     }
@@ -40,7 +50,7 @@ export function LoginPage() {
         </div>
 
         <div className="card p-8">
-          <h2 className="text-xl font-semibold text-slate-900 mb-6">{t('Sign In')}</h2>
+          <h2 className="text-xl font-semibold text-slate-900 mb-6">{needsInitialOwnerSetup ? t('Create owner account') : t('Sign In')}</h2>
 
           {error && (
             <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg p-3 mb-4 text-sm text-red-700">
@@ -58,6 +68,15 @@ export function LoginPage() {
               autoFocus
               required
             />
+            {needsInitialOwnerSetup && (
+              <Input
+                label={t('Display name')}
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder={t('Enter display name')}
+                required
+              />
+            )}
             <div className="space-y-1.5">
               <label className="block text-sm font-medium text-slate-700">{t('Password')}</label>
               <div className="relative">
@@ -67,13 +86,27 @@ export function LoginPage() {
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder={t('Enter password')}
                   required
+                  minLength={needsInitialOwnerSetup ? 10 : undefined}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent transition-all"
                 />
                 <Lock className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
               </div>
             </div>
+            {needsInitialOwnerSetup && (
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-slate-700">{t('Confirm password')}</label>
+                <input
+                  type="password"
+                  value={confirmation}
+                  onChange={(e) => setConfirmation(e.target.value)}
+                  required
+                  minLength={10}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent transition-all"
+                />
+              </div>
+            )}
             <Button type="submit" size="lg" className="w-full" disabled={loading}>
-              {loading ? t('Please wait...') : t('Sign In')}
+              {loading ? t('Please wait...') : needsInitialOwnerSetup ? t('Create account') : t('Sign In')}
             </Button>
           </form>
         </div>

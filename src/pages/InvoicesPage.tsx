@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { query } from '@/db/client';
-import { formatEgp, formatQuantity } from '@/lib/money';
+import { formatEgp } from '@/lib/money';
 import { arabicSearchPattern, normalizeArabicSql } from '@/lib/search';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Receipt } from '@/components/Receipt';
 import type { Sale } from '@/types';
 import {
-  Search, Receipt as ReceiptIcon, Printer, Eye, Calendar, RotateCw
+  Search, Receipt as ReceiptIcon, Eye, RotateCw
 } from 'lucide-react';
 
 type InvoiceSale = Sale & { refunded_total: number };

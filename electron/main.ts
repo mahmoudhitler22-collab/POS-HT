@@ -7,6 +7,17 @@ let mainWindow: BrowserWindow | null = null;
 
 const isDev = !app.isPackaged;
 
+function openTrustedExternalUrl(url: string): void {
+  try {
+    const parsedUrl = new URL(url);
+    if (parsedUrl.protocol === 'https:') {
+      void shell.openExternal(parsedUrl.toString());
+    }
+  } catch {
+    // Ignore malformed links rather than passing them to the operating system.
+  }
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -35,7 +46,7 @@ function createWindow(): void {
 
   // Open external links in the system browser, not in-app
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openTrustedExternalUrl(url);
     return { action: 'deny' };
   });
 }

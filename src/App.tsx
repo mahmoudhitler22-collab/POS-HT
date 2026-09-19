@@ -19,8 +19,52 @@ import { UsersPage } from '@/pages/UsersPage';
 import { BackupPage } from '@/pages/BackupPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 
+function InitialPasswordPage() {
+  const { changeInitialPassword } = useAuth();
+  const [password, setPassword] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (password !== confirmation) {
+      setError('Passwords do not match.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    const result = await changeInitialPassword(password);
+    if (!result.success) setError(result.error || 'Could not change password.');
+    setSaving(false);
+  };
+
+  return (
+    <main className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
+      <form onSubmit={submit} className="w-full max-w-md rounded-xl bg-white p-7 shadow-xl space-y-5">
+        <div>
+          <h1 className="text-xl font-semibold text-slate-900">Change the initial password</h1>
+          <p className="mt-2 text-sm text-slate-600">For your security, choose a new password before using the POS.</p>
+        </div>
+        {error && <p className="rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+        <label className="block text-sm font-medium text-slate-700">
+          New password
+          <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" type="password" minLength={10} value={password} onChange={(event) => setPassword(event.target.value)} required />
+        </label>
+        <label className="block text-sm font-medium text-slate-700">
+          Confirm new password
+          <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" type="password" minLength={10} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required />
+        </label>
+        <button className="w-full rounded-lg bg-teal-600 px-4 py-2 font-medium text-white disabled:opacity-60" disabled={saving} type="submit">
+          {saving ? 'Saving…' : 'Save password'}
+        </button>
+      </form>
+    </main>
+  );
+}
+
 function AppContent() {
-  const { user, loading, hasPermission } = useAuth();
+  const { user, loading, mustChangePassword, hasPermission } = useAuth();
   const { t } = useLanguage();
   const [currentPage, setCurrentPage] = useState<PageKey>('dashboard');
 
@@ -37,6 +81,10 @@ function AppContent() {
 
   if (!user) {
     return <LoginPage />;
+  }
+
+  if (mustChangePassword) {
+    return <InitialPasswordPage />;
   }
 
   // If user lacks permission for the current page, redirect to first available

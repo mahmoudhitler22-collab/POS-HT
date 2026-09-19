@@ -3,7 +3,7 @@ import { query } from '@/db/client';
 import { formatEgp, formatQuantity } from '@/lib/money';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { BarChart3, Clock3, RefreshCw, Trophy } from 'lucide-react';
+import { Clock3, RefreshCw, Trophy } from 'lucide-react';
 
 type Period = 'today' | 'week' | 'month' | 'year' | 'custom';
 interface EmployeeRow {

@@ -2,25 +2,28 @@ import { useState, useEffect, useCallback } from 'react';
 import { query, transaction } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { logAudit } from '@/lib/audit';
-import { formatEgp, formatQuantity } from '@/lib/money';
+import { formatEgp, formatQuantity, parseLocalizedNumber } from '@/lib/money';
 import { arabicSearchPattern, matchesArabicSearch, normalizeArabicSql } from '@/lib/search';
 import { toast } from '@/components/ui/Toast';
 import { Button } from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
-import { Modal, ConfirmDialog } from '@/components/ui/Modal';
+import { Modal } from '@/components/ui/Modal';
 import type { Product, InventoryMovement } from '@/types';
 import {
-  Boxes, Search, Plus, Minus, AlertTriangle, ClipboardCheck,
+  Boxes, Search, Plus, AlertTriangle, ClipboardCheck,
   History, TrendingUp, TrendingDown
 } from 'lucide-react';
 
 type Tab = 'overview' | 'movements' | 'stocktake' | 'adjust';
+type InventoryProduct = Product & { variant_count: number; variant_total_stock: number };
+
+const stockQuantity = (product: InventoryProduct): number =>
+  Number(product.variant_count) > 0 ? Number(product.variant_total_stock) : product.quantity;
 
 export function InventoryPage() {
-  const { user } = useAuth();
   const [tab, setTab] = useState<Tab>('overview');
-  const [products, setProducts] = useState<Product[]>([]);
+  const [products, setProducts] = useState<InventoryProduct[]>([]);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'low' | 'out'>('all');
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
@@ -28,17 +31,27 @@ export function InventoryPage() {
   const [showStocktakeModal, setShowStocktakeModal] = useState(false);
 
   const loadProducts = useCallback(async () => {
-    let sql = `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.is_active = 1`;
+    let sql = `SELECT p.*, c.name as category_name,
+                      COALESCE(v.variant_count, 0) AS variant_count,
+                      COALESCE(v.variant_total_stock, 0) AS variant_total_stock
+                 FROM products p
+                 LEFT JOIN categories c ON p.category_id = c.id
+                 LEFT JOIN (
+                   SELECT product_id, COUNT(*) AS variant_count, SUM(quantity) AS variant_total_stock
+                     FROM product_variants WHERE is_active = 1 GROUP BY product_id
+                 ) v ON v.product_id = p.id
+                WHERE p.is_active = 1`;
     const params: unknown[] = [];
-    if (filter === 'low') sql += ` AND p.quantity > 0 AND p.quantity <= p.min_stock_level`;
-    if (filter === 'out') sql += ` AND p.quantity <= 0`;
     if (search.trim()) {
       sql += ` AND (${normalizeArabicSql('p.name')} LIKE $1 OR ${normalizeArabicSql('p.sku')} LIKE $1 OR ${normalizeArabicSql('p.barcode')} LIKE $1)`;
       params.push(arabicSearchPattern(search));
     }
     sql += ` ORDER BY p.name`;
-    const res = await query<Product>(sql, params);
-    setProducts(res.rows);
+    const res = await query<InventoryProduct>(sql, params);
+    setProducts(res.rows.filter((product) => {
+      const quantity = stockQuantity(product);
+      return filter === 'all' || (filter === 'low' ? quantity > 0 && quantity <= product.min_stock_level : quantity <= 0);
+    }));
   }, [search, filter]);
 
   const loadMovements = useCallback(async () => {
@@ -55,9 +68,9 @@ export function InventoryPage() {
   useEffect(() => { loadProducts(); }, [loadProducts]);
   useEffect(() => { if (tab === 'movements') loadMovements(); }, [tab, loadMovements]);
 
-  const inventoryValue = products.reduce((sum, p) => sum + (p.purchase_cost ?? 0) * p.quantity, 0);
-  const lowStockCount = products.filter((p) => p.quantity > 0 && p.quantity <= p.min_stock_level).length;
-  const outStockCount = products.filter((p) => p.quantity <= 0).length;
+  const inventoryValue = products.reduce((sum, p) => sum + (p.purchase_cost ?? 0) * stockQuantity(p), 0);
+  const lowStockCount = products.filter((p) => stockQuantity(p) > 0 && stockQuantity(p) <= p.min_stock_level).length;
+  const outStockCount = products.filter((p) => stockQuantity(p) <= 0).length;
 
   return (
     <div className="space-y-6">
@@ -179,16 +192,22 @@ export function InventoryPage() {
                           {p.size && <span className="text-xs text-slate-400">{p.size} · {p.color}</span>}
                         </td>
                         <td className="px-4 py-3 text-sm text-slate-600 font-mono">{p.barcode || '—'}</td>
-                        <td className="px-4 py-3 text-right text-sm font-medium text-slate-900">{formatQuantity(p.quantity)}</td>
+                        <td className="px-4 py-3 text-right text-sm font-medium text-slate-900">{formatQuantity(stockQuantity(p))}</td>
                         <td className="px-4 py-3 text-right text-sm text-slate-500">{formatQuantity(p.min_stock_level)}</td>
                         <td className="px-4 py-3 text-center">
-                          {p.quantity <= 0 ? <Badge variant="danger">Out of Stock</Badge> :
-                           p.quantity <= p.min_stock_level ? <Badge variant="warning">Low Stock</Badge> :
+                          {stockQuantity(p) <= 0 ? <Badge variant="danger">Out of Stock</Badge> :
+                           stockQuantity(p) <= p.min_stock_level ? <Badge variant="warning">Low Stock</Badge> :
                            <Badge variant="success">In Stock</Badge>}
                         </td>
                         <td className="px-4 py-3 text-center">
-                          <Button size="sm" variant="outline" onClick={() => setShowAdjustModal(p)}>
-                            Adjust
+                          <Button size="sm" variant="outline" onClick={() => {
+                            if (Number(p.variant_count) > 0) {
+                              toast('info', 'Adjust stock for each color and size from the product variants matrix');
+                              return;
+                            }
+                            setShowAdjustModal(p);
+                          }}>
+                            {Number(p.variant_count) > 0 ? 'Manage Variants' : 'Adjust'}
                           </Button>
                         </td>
                       </tr>
@@ -298,7 +317,7 @@ function AdjustStockModal({ product, onClose, onSaved }: { product: Product; onC
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const qty = parseFloat(quantity) || 0;
+    const qty = parseLocalizedNumber(quantity) || 0;
     if (qty <= 0) { toast('error', 'Quantity must be greater than zero'); return; }
     if (!reason.trim()) { toast('error', 'Please provide a reason'); return; }
 
@@ -331,7 +350,7 @@ function AdjustStockModal({ product, onClose, onSaved }: { product: Product; onC
 
       toast('success', 'Stock adjusted successfully');
       onSaved();
-    } catch (err) {
+    } catch {
       toast('error', 'Failed to adjust stock');
     }
   };
@@ -362,20 +381,28 @@ function AdjustStockModal({ product, onClose, onSaved }: { product: Product; onC
 
 function StocktakeModal({ onClose, onCompleted }: { onClose: () => void; onCompleted: () => void }) {
   const { user } = useAuth();
-  const [products, setProducts] = useState<{ id: number; name: string; system_qty: number; counted_qty: string; size: string | null; color: string | null }[]>([]);
+  const [products, setProducts] = useState<{ product_id: number; variant_id: number | null; name: string; system_qty: number; counted_qty: string; size: string | null; color: string | null }[]>([]);
   const [search, setSearch] = useState('');
 
   useEffect(() => {
     (async () => {
-      const res = await query<{ id: number; name: string; quantity: number; size: string | null; color: string | null }>(
-        'SELECT id, name, quantity, size, color FROM products WHERE is_active = 1 ORDER BY name'
+      const res = await query<{ product_id: number; variant_id: number | null; name: string; quantity: number; size: string | null; color: string | null }>(
+        `SELECT p.id AS product_id, CAST(NULL AS INTEGER) AS variant_id, p.name, p.quantity, p.size, p.color
+           FROM products p
+          WHERE p.is_active = 1
+            AND NOT EXISTS (SELECT 1 FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1)
+         UNION ALL
+         SELECT p.id AS product_id, pv.id AS variant_id, p.name, pv.quantity, pv.size, pv.color
+           FROM product_variants pv JOIN products p ON p.id = pv.product_id
+          WHERE p.is_active = 1 AND pv.is_active = 1
+         ORDER BY name, color, size`
       );
-      setProducts(res.rows.map((p) => ({ id: p.id, name: p.name, system_qty: p.quantity, counted_qty: '', size: p.size, color: p.color })));
+      setProducts(res.rows.map((p) => ({ ...p, system_qty: p.quantity, counted_qty: '' })));
     })();
   }, []);
 
   const filtered = products.filter((p) => !search || matchesArabicSearch(p.name, search));
-  const differences = products.filter((p) => p.counted_qty && parseFloat(p.counted_qty) !== p.system_qty);
+  const differences = products.filter((p) => p.counted_qty && parseLocalizedNumber(p.counted_qty) !== p.system_qty);
 
   const handleComplete = async () => {
     if (differences.length === 0) {
@@ -387,13 +414,17 @@ function StocktakeModal({ onClose, onCompleted }: { onClose: () => void; onCompl
     try {
       await transaction(async (tx) => {
         for (const p of differences) {
-          const counted = parseFloat(p.counted_qty);
+          const counted = parseLocalizedNumber(p.counted_qty);
           const change = counted - p.system_qty;
-          await tx.exec('UPDATE products SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [counted, p.id]);
+          if (p.variant_id === null) {
+            await tx.exec('UPDATE products SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [counted, p.product_id]);
+          } else {
+            await tx.exec('UPDATE product_variants SET quantity = $1, updated_at = datetime(\'now\') WHERE id = $2', [counted, p.variant_id]);
+          }
           await tx.exec(
-            `INSERT INTO inventory_movements (product_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
-             VALUES ($1, $2, $3, $4, 'Stocktake adjustment', 'stocktake', NULL, $5)`,
-            [p.id, change, p.system_qty, counted, user!.id]
+            `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
+             VALUES ($1, $2, $3, $4, $5, 'Stocktake adjustment', 'stocktake', NULL, $6)`,
+            [p.product_id, p.variant_id, change, p.system_qty, counted, user!.id]
           );
         }
       });
@@ -438,19 +469,20 @@ function StocktakeModal({ onClose, onCompleted }: { onClose: () => void; onCompl
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.map((p) => {
-                const counted = p.counted_qty ? parseFloat(p.counted_qty) : null;
+                const counted = p.counted_qty ? parseLocalizedNumber(p.counted_qty) : null;
                 const diff = counted !== null ? counted - p.system_qty : null;
                 return (
-                  <tr key={p.id} className={diff !== null && diff !== 0 ? 'bg-amber-50' : ''}>
+                  <tr key={`${p.product_id}:${p.variant_id ?? 'product'}`} className={diff !== null && diff !== 0 ? 'bg-amber-50' : ''}>
                     <td className="px-3 py-2 text-sm text-slate-900">{p.name}
                       {p.size && <span className="text-xs text-slate-400 ml-2">{p.size} {p.color}</span>}
                     </td>
                     <td className="px-3 py-2 text-right text-sm text-slate-600">{formatQuantity(p.system_qty)}</td>
                     <td className="px-3 py-2 text-right">
                       <input
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         value={p.counted_qty}
-                        onChange={(e) => setProducts((prev) => prev.map((x) => x.id === p.id ? { ...x, counted_qty: e.target.value } : x))}
+                        onChange={(e) => setProducts((prev) => prev.map((x) => x.product_id === p.product_id && x.variant_id === p.variant_id ? { ...x, counted_qty: e.target.value } : x))}
                         className="w-20 text-right text-sm border border-slate-200 rounded px-2 py-1"
                         placeholder="—"
                       />

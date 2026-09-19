@@ -1,12 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { query, getAuthSessionId } from '@/db/client';
+import { getAuthSessionId } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { logAudit } from '@/lib/audit';
-import { formatEgp } from '@/lib/money';
 import { toast } from '@/components/ui/Toast';
 import { Button } from '@/components/ui/Button';
-import { Badge } from '@/components/ui/Badge';
-import { Modal, ConfirmDialog } from '@/components/ui/Modal';
+import { ConfirmDialog } from '@/components/ui/Modal';
 import type { BackupInfo } from '@/electron.d';
 import {
   DatabaseBackup, Download, Upload, Trash2, HardDrive,

@@ -172,6 +172,9 @@ const operationalAr: Record<string, string> = {
   'Enable': 'تفعيل', 'Disable': 'تعطيل',
   'Duplicate color name': 'اسم اللون مكرر', 'Duplicate size name': 'اسم المقاس مكرر',
   'Total active variants': 'إجمالي المتغيرات المفعّلة',
+  'Receipt': 'الإيصال', 'Receipt Preview': 'معاينة الإيصال', 'Close': 'إغلاق', 'Printing...': 'جارٍ الطباعة...',
+  'Print Receipt': 'طباعة الإيصال', 'Printer': 'الطابعة', 'Default': 'الافتراضي', 'Item': 'الصنف',
+  'Price': 'السعر', 'This is a computer-generated receipt': 'هذا إيصال صادر من النظام',
 };
 
 function translateArabicText(value: string): string {

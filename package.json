@@ -11,6 +11,7 @@
     "build:electron": "tsc -p tsconfig.electron.json && node scripts/post-electron-build.js && vite build && electron-builder --win",
     "build:dir": "tsc -p tsconfig.electron.json && node scripts/post-electron-build.js && vite build && electron-builder --win --dir",
     "lint": "eslint .",
+    "test": "node --experimental-strip-types --test test/database-regression.test.mts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
   },

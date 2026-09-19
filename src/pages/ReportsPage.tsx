@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { query } from '@/db/client';
 import { formatEgp, formatQuantity } from '@/lib/money';
 import { Button } from '@/components/ui/Button';
-import { Input, Select } from '@/components/ui/Input';
-import { Badge } from '@/components/ui/Badge';
+import { Input } from '@/components/ui/Input';
+import { useLanguage } from '@/context/LanguageContext';
 import {
   BarChart3, Download, TrendingUp, Wallet, Package, Undo2, Boxes, FileSpreadsheet, FileType
 } from 'lucide-react';
@@ -12,6 +12,7 @@ import { exportExcel, exportPDF } from '@/lib/export';
 type ReportType = 'sales' | 'profit' | 'inventory' | 'expenses' | 'refunds' | 'bestSelling' | 'stockMovement';
 
 export function ReportsPage() {
+  const { t } = useLanguage();
   const [reportType, setReportType] = useState<ReportType>('sales');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -225,31 +226,32 @@ export function ReportsPage() {
       expenses: 'Expenses Report', refunds: 'Refund Report', bestSelling: 'Best-Selling Products',
       stockMovement: 'Stock Movement Report',
     };
-    exportPDF(labels[reportType] || 'Report', cols, data as Record<string, unknown>[]);
+    exportPDF(t(labels[reportType] || 'Report'), cols, data as Record<string, unknown>[]);
   };
 
   const reportTypes: { key: ReportType; label: string; icon: React.ReactNode }[] = [
-    { key: 'sales', label: 'Sales Report', icon: <TrendingUp size={18} /> },
-    { key: 'profit', label: 'Profit Report', icon: <Wallet size={18} /> },
-    { key: 'inventory', label: 'Inventory Report', icon: <Boxes size={18} /> },
-    { key: 'expenses', label: 'Expenses Report', icon: <Wallet size={18} /> },
-    { key: 'refunds', label: 'Refund Report', icon: <Undo2 size={18} /> },
-    { key: 'bestSelling', label: 'Best-Selling Products', icon: <BarChart3 size={18} /> },
-    { key: 'stockMovement', label: 'Stock Movement', icon: <Package size={18} /> },
+    { key: 'sales', label: t('Sales Report'), icon: <TrendingUp size={18} /> },
+    { key: 'profit', label: t('Profit Report'), icon: <Wallet size={18} /> },
+    { key: 'inventory', label: t('Inventory Report'), icon: <Boxes size={18} /> },
+    { key: 'expenses', label: t('Expenses Report'), icon: <Wallet size={18} /> },
+    { key: 'refunds', label: t('Refund Report'), icon: <Undo2 size={18} /> },
+    { key: 'bestSelling', label: t('Best-Selling Products'), icon: <BarChart3 size={18} /> },
+    { key: 'stockMovement', label: t('Stock Movement'), icon: <Package size={18} /> },
   ];
 
   const renderTable = () => {
     if (data.length === 0) {
-      return <tr><td colSpan={99} className="text-center py-12 text-slate-400">No data for this report</td></tr>;
+      return <tr><td colSpan={99} className="text-center py-12 text-slate-400">{t('No data for this report')}</td></tr>;
     }
     const headers = Object.keys(data[0] as Record<string, unknown>);
+    const headerLabels = new Map(getColumns().map((column) => [column.key, column.header]));
     return (
       <>
         <thead className="bg-slate-50 border-b border-slate-200">
           <tr>
             {headers.map((h) => (
               <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                {h.replace(/_/g, ' ')}
+                {t(headerLabels.get(h) || h.replace(/_/g, ' '))}
               </th>
             ))}
           </tr>
@@ -283,7 +285,7 @@ export function ReportsPage() {
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Reports</h1>
-          <p className="text-sm text-slate-500 mt-0.5">Generate and export business reports</p>
+          <p className="text-sm text-slate-500 mt-0.5">{t('Generate and export business reports')}</p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={exportCSV} disabled={data.length === 0}>
@@ -315,9 +317,9 @@ export function ReportsPage() {
 
       {needsDateFilter && (
         <div className="card p-4 flex gap-3 flex-wrap items-end">
-          <Input label="From Date" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="w-auto" />
-          <Input label="To Date" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="w-auto" />
-          <Button onClick={loadReport} disabled={loading}>{loading ? 'Loading...' : 'Generate Report'}</Button>
+          <Input label={t('From Date')} type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="w-auto" />
+          <Input label={t('To Date')} type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="w-auto" />
+          <Button onClick={loadReport} disabled={loading}>{loading ? t('Loading...') : t('Generate Report')}</Button>
         </div>
       )}
 

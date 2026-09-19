@@ -1,18 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import { query } from '@/db/client';
-import { useAuth } from '@/context/AuthContext';
 import { formatEgp, formatQuantity } from '@/lib/money';
-import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import {
-  TrendingUp, TrendingDown, DollarSign, ShoppingCart, Receipt,
+  TrendingUp, TrendingDown, DollarSign, Receipt,
   Wallet, AlertTriangle, Package, Award, Clock
 } from 'lucide-react';
 
 type Period = 'today' | 'yesterday' | 'week' | 'month' | 'lastMonth' | 'year' | 'all';
 
 export function DashboardPage() {
-  const { hasPermission } = useAuth();
   const [period, setPeriod] = useState<Period>('today');
   const [stats, setStats] = useState({
     totalSales: 0,

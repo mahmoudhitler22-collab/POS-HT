@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { CheckCircle, AlertCircle, Info, X } from 'lucide-react';
 import { useLanguage } from '@/context/LanguageContext';
 

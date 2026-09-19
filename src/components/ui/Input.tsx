@@ -6,12 +6,17 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
 }
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(
-  ({ label, error, className = '', ...props }, ref) => {
+  ({ label, error, className = '', type, inputMode, ...props }, ref) => {
+    // Chromium discards Arabic-Indic digits from native number fields before
+    // React sees them. A decimal text field keeps both 12.5 and ١٢٫٥ usable.
+    const isLocalizedNumber = type === 'number';
     return (
       <div className="space-y-1.5">
         {label && <label className="block text-sm font-medium text-slate-700">{label}</label>}
         <input
           ref={ref}
+          type={isLocalizedNumber ? 'text' : type}
+          inputMode={isLocalizedNumber ? 'decimal' : inputMode}
           className={`w-full rounded-lg border px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent transition-all ${
             error ? 'border-red-400' : 'border-slate-300'
           } ${className}`}

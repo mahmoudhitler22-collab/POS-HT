@@ -1,12 +1,12 @@
-import { ipcMain, BrowserWindow, dialog } from 'electron';
-import { copyFileSync } from 'fs';
-import { getDb, createBackup, restoreFromBackup, listBackups, deleteBackup, getDatabasePath, getBackupDir } from './database';
+import { ipcMain, BrowserWindow, dialog, WebContents } from 'electron';
+import { getDb, createBackup, backupTo, restoreFromBackup, listBackups, deleteBackup, getDatabasePath, getBackupDir } from './database';
 import { BrowserWindow as BW } from 'electron';
 import {
   login, logout, restoreSession, checkSqlPermission, isSelectSql,
-  requirePermission, hasPermission, getSession, hashPassword,
+  requirePermission, hasPermission, getSession, hashPassword, changeInitialPassword,
 } from './auth';
 import os from 'os';
+import { normalizeArabicSearch } from '../src/lib/search';
 
 export interface TxStep {
   type: 'query' | 'exec';
@@ -56,10 +56,14 @@ interface TxSession {
   id: number;
   savepointName: string;
   authSessionId: number;
+  ownerWebContentsId: number;
+  timeout: ReturnType<typeof setTimeout>;
 }
 
 const txSessions = new Map<number, TxSession>();
 let txSessionCounter = 0;
+const INTERACTIVE_TRANSACTION_TIMEOUT_MS = 30_000;
+const watchedTransactionOwners = new Set<number>();
 
 // Interactive transactions share one SQLite connection. Savepoints are
 // connection-scoped, so overlapping transactions could otherwise nest and
@@ -88,6 +92,52 @@ function releaseTransactionSlot(id: number): void {
   }
 }
 
+// Interactive transactions hold the single SQLite connection. They must be
+// closed even if the renderer reloads, crashes, or never sends a commit.
+function settleTransaction(id: number, commit: boolean): void {
+  const session = txSessions.get(id);
+  if (!session) return;
+
+  try {
+    if (commit) {
+      getDb().exec(`RELEASE ${session.savepointName}`);
+    } else {
+      getDb().exec(`ROLLBACK TO ${session.savepointName}`);
+      getDb().exec(`RELEASE ${session.savepointName}`);
+    }
+  } catch (err) {
+    if (commit) {
+      try {
+        getDb().exec(`ROLLBACK TO ${session.savepointName}`);
+        getDb().exec(`RELEASE ${session.savepointName}`);
+      } catch { /* preserve the original commit error */ }
+    }
+    throw err;
+  } finally {
+    clearTimeout(session.timeout);
+    txSessions.delete(id);
+    releaseTransactionSlot(id);
+  }
+}
+
+function settleTransactionsForOwner(ownerWebContentsId: number): void {
+  for (const session of [...txSessions.values()]) {
+    if (session.ownerWebContentsId === ownerWebContentsId) {
+      try { settleTransaction(session.id, false); } catch { /* connection is being closed */ }
+    }
+  }
+}
+
+function watchTransactionOwner(owner: WebContents): void {
+  if (watchedTransactionOwners.has(owner.id)) return;
+  watchedTransactionOwners.add(owner.id);
+  owner.on('did-start-navigation', () => settleTransactionsForOwner(owner.id));
+  owner.once('destroyed', () => {
+    settleTransactionsForOwner(owner.id);
+    watchedTransactionOwners.delete(owner.id);
+  });
+}
+
 // ─── Helper: validate session and return SessionInfo or error ─
 // Every protected handler starts with this check. If the session is
 // missing or invalid, we return an auth error before touching the DB.
@@ -95,6 +145,9 @@ function validateSession(sessionId: number | undefined): { ok: true; session: No
   const session = getSession(sessionId);
   if (!session) {
     return { ok: false, error: 'Not authenticated. Please log in again.' };
+  }
+  if (session.mustChangePassword) {
+    return { ok: false, error: 'You must change the initial password before using the application.' };
   }
   return { ok: true, session };
 }
@@ -106,6 +159,10 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   ipcMain.handle('auth:login', async (_event, username: string, password: string) => {
     const result = login(username, password);
     return result;
+  });
+
+  ipcMain.handle('auth:changeInitialPassword', async (_event, sessionId: number, password: string) => {
+    return changeInitialPassword(sessionId, password);
   });
 
   // ─── Auth: Logout ─────────────────────────────────────────
@@ -154,7 +211,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       customerId: number | null;
       paymentMethod: string;
       globalDiscount: { type: 'percentage' | 'fixed' | 'none'; value: number };
-      items: Array<{ productId: number; quantity: number; discountType: 'percentage' | 'fixed' | null; discountValue: number }>;
+      items: Array<{ productId: number; variantId: number | null; quantity: number; discountType: 'percentage' | 'fixed' | null; discountValue: number }>;
     },
     sessionId?: number,
   ) => {
@@ -178,12 +235,13 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         );
         const maxDiscount = Number.parseInt(settings.get('max_discount_percentage') ?? '20', 10);
         const allowNegativeStock = settings.get('allow_negative_stock') === '1';
-        const seenProducts = new Set<number>();
+        const seenItems = new Set<string>();
         const items = request.items.map((input) => {
-          if (!Number.isInteger(input.productId) || seenProducts.has(input.productId)) {
-            throw new Error('Each product may appear only once in a sale');
+          const itemKey = `${input.productId}:${input.variantId ?? 'product'}`;
+          if (!Number.isInteger(input.productId) || seenItems.has(itemKey)) {
+            throw new Error('Each product variant may appear only once in a sale');
           }
-          seenProducts.add(input.productId);
+          seenItems.add(itemKey);
           if (!Number.isFinite(input.quantity) || input.quantity <= 0) throw new Error('Sale quantities must be positive');
           if (!Number.isFinite(input.discountValue) || input.discountValue < 0) throw new Error('Discount values must be non-negative');
           if (input.discountType !== null && input.discountType !== 'percentage' && input.discountType !== 'fixed') {
@@ -197,17 +255,29 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
             | { id: number; name: string; selling_price: number; purchase_cost: number; quantity: number; is_active: number }
             | undefined;
           if (!product || product.is_active !== 1) throw new Error('One or more products are unavailable');
-          if (!allowNegativeStock && product.quantity < input.quantity) {
+          type SaleVariant = { id: number; selling_price: number | null; purchase_cost: number | null; quantity: number; is_active: number };
+          let variant: SaleVariant | null = null;
+          if (input.variantId !== null) {
+            if (!Number.isInteger(input.variantId)) throw new Error('Invalid product variant');
+            variant = db.prepare(
+              'SELECT id, selling_price, purchase_cost, quantity, is_active FROM product_variants WHERE id = ? AND product_id = ?'
+            ).get(input.variantId, input.productId) as SaleVariant | undefined ?? null;
+            if (!variant || variant.is_active !== 1) throw new Error(`Selected variant for ${product.name} is unavailable`);
+          }
+          const availableQuantity = variant?.quantity ?? product.quantity;
+          if (!allowNegativeStock && availableQuantity < input.quantity) {
             throw new Error(`Insufficient stock for ${product.name}`);
           }
 
-          const gross = product.selling_price * input.quantity;
+          const unitPrice = variant?.selling_price ?? product.selling_price;
+          const cost = variant?.purchase_cost ?? product.purchase_cost;
+          const gross = unitPrice * input.quantity;
           const itemDiscount = input.discountType === 'percentage'
             ? Math.round(gross * input.discountValue / 100)
             : input.discountType === 'fixed'
               ? Math.min(Math.round(input.discountValue * 100), gross)
               : 0;
-          return { ...input, product, gross, itemDiscount, afterItemDiscount: gross - itemDiscount };
+          return { ...input, product, variant, unitPrice, cost, availableQuantity, gross, itemDiscount, afterItemDiscount: gross - itemDiscount };
         });
 
         const subtotal = items.reduce((total, item) => total + item.gross, 0);
@@ -249,19 +319,21 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         ).get(invoiceNumber, customerId, validation.session.userId, subtotal, totalDiscount, total, request.paymentMethod.trim()) as { id: number }).id;
 
         const insertItem = db.prepare(
-          `INSERT INTO sale_items (sale_id, product_id, product_name, unit_price, quantity, discount_type, discount_value, discount_amount, final_price, cost_at_sale, line_total)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO sale_items (sale_id, product_id, variant_id, product_name, unit_price, quantity, discount_type, discount_value, discount_amount, final_price, cost_at_sale, line_total)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         const updateProduct = db.prepare("UPDATE products SET quantity = ?, updated_at = datetime('now') WHERE id = ?");
+        const updateVariant = db.prepare("UPDATE product_variants SET quantity = ?, updated_at = datetime('now') WHERE id = ?");
         const movement = db.prepare(
-          `INSERT INTO inventory_movements (product_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
-           VALUES (?, ?, ?, ?, 'Sale', 'sale', ?, ?)`,
+          `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
+           VALUES (?, ?, ?, ?, ?, 'Sale', 'sale', ?, ?)`,
         );
         for (const item of pricedItems) {
-          insertItem.run(saleId, item.product.id, item.product.name, item.product.selling_price, item.quantity, item.discountType, item.discountType === 'fixed' ? Math.round(item.discountValue * 100) : item.discountValue, item.discountAmount, item.finalPrice, item.product.purchase_cost, item.finalPrice);
-          const nextQuantity = item.product.quantity - item.quantity;
-          updateProduct.run(nextQuantity, item.product.id);
-          movement.run(item.product.id, -item.quantity, item.product.quantity, nextQuantity, saleId, validation.session.userId);
+          insertItem.run(saleId, item.product.id, item.variant?.id ?? null, item.product.name, item.unitPrice, item.quantity, item.discountType, item.discountType === 'fixed' ? Math.round(item.discountValue * 100) : item.discountValue, item.discountAmount, item.finalPrice, item.cost, item.finalPrice);
+          const nextQuantity = item.availableQuantity - item.quantity;
+          if (item.variant) updateVariant.run(nextQuantity, item.variant.id);
+          else updateProduct.run(nextQuantity, item.product.id);
+          movement.run(item.product.id, item.variant?.id ?? null, -item.quantity, item.availableQuantity, nextQuantity, saleId, validation.session.userId);
         }
         db.prepare('INSERT INTO payments (sale_id, method, amount) VALUES (?, ?, ?)').run(saleId, request.paymentMethod.trim(), total);
 
@@ -315,8 +387,8 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         }
 
         const refundLines = [...requested.entries()].map(([saleItemId, quantity]) => {
-          const item = db.prepare('SELECT id, sale_id, product_id, product_name, unit_price, quantity, final_price FROM sale_items WHERE id = ?').get(saleItemId) as
-            | { id: number; sale_id: number; product_id: number; product_name: string; unit_price: number; quantity: number; final_price: number }
+          const item = db.prepare('SELECT id, sale_id, product_id, variant_id, product_name, unit_price, quantity, final_price FROM sale_items WHERE id = ?').get(saleItemId) as
+            | { id: number; sale_id: number; product_id: number; variant_id: number | null; product_name: string; unit_price: number; quantity: number; final_price: number }
             | undefined;
           if (!item || item.sale_id !== sale.id) throw new Error('Refund item does not belong to this sale');
           const previous = db.prepare('SELECT COALESCE(SUM(quantity), 0) AS quantity, COALESCE(SUM(refund_amount), 0) AS amount FROM refund_items WHERE sale_item_id = ?').get(item.id) as { quantity: number; amount: number };
@@ -340,17 +412,22 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
           'INSERT INTO refunds (refund_number, sale_id, customer_id, cashier_id, total, reason) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
         ).get(refundNumber, sale.id, sale.customer_id, validation.session.userId, refundTotal, typeof request.reason === 'string' ? request.reason.trim() : '') as { id: number }).id;
 
-        const insertItem = db.prepare('INSERT INTO refund_items (refund_id, sale_item_id, product_id, product_name, quantity, unit_price, refund_amount) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        const insertItem = db.prepare('INSERT INTO refund_items (refund_id, sale_item_id, product_id, variant_id, product_name, quantity, unit_price, refund_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
         const productRow = db.prepare('SELECT quantity FROM products WHERE id = ?');
         const updateProduct = db.prepare("UPDATE products SET quantity = ?, updated_at = datetime('now') WHERE id = ?");
-        const movement = db.prepare("INSERT INTO inventory_movements (product_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id) VALUES (?, ?, ?, ?, 'Refund', 'refund', ?, ?)");
+        const variantRow = db.prepare('SELECT quantity FROM product_variants WHERE id = ? AND product_id = ?');
+        const updateVariant = db.prepare("UPDATE product_variants SET quantity = ?, updated_at = datetime('now') WHERE id = ?");
+        const movement = db.prepare("INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id) VALUES (?, ?, ?, ?, ?, 'Refund', 'refund', ?, ?)");
         for (const line of refundLines) {
-          const product = productRow.get(line.item.product_id) as { quantity: number } | undefined;
-          if (!product) throw new Error(`Product for ${line.item.product_name} no longer exists`);
-          insertItem.run(refundId, line.item.id, line.item.product_id, line.item.product_name, line.quantity, line.item.unit_price, line.amount);
-          const nextQuantity = product.quantity + line.quantity;
-          updateProduct.run(nextQuantity, line.item.product_id);
-          movement.run(line.item.product_id, line.quantity, product.quantity, nextQuantity, refundId, validation.session.userId);
+          const inventory = line.item.variant_id === null
+            ? productRow.get(line.item.product_id) as { quantity: number } | undefined
+            : variantRow.get(line.item.variant_id, line.item.product_id) as { quantity: number } | undefined;
+          if (!inventory) throw new Error(`Product for ${line.item.product_name} no longer exists`);
+          insertItem.run(refundId, line.item.id, line.item.product_id, line.item.variant_id, line.item.product_name, line.quantity, line.item.unit_price, line.amount);
+          const nextQuantity = inventory.quantity + line.quantity;
+          if (line.item.variant_id === null) updateProduct.run(nextQuantity, line.item.product_id);
+          else updateVariant.run(nextQuantity, line.item.variant_id);
+          movement.run(line.item.product_id, line.item.variant_id, line.quantity, inventory.quantity, nextQuantity, refundId, validation.session.userId);
         }
         if (sale.customer_id !== null) {
           db.prepare('UPDATE customers SET total_purchases = MAX(0, total_purchases - ?) WHERE id = ?').run(refundTotal, sale.customer_id);
@@ -452,7 +529,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   // ─── Interactive Transaction: Begin ──────────────────────
   // Requires a valid session — the auth sessionId is bound to the
   // transaction session so every subsequent txQuery/txExec is checked.
-  ipcMain.handle('db:txBegin', async (_event, sessionId?: number) => {
+  ipcMain.handle('db:txBegin', async (event, sessionId?: number) => {
     try {
       const validation = validateSession(sessionId);
       if (!validation.ok) return { success: false, error: validation.error };
@@ -463,7 +540,11 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         const db = getDb();
         const savepointName = `tx_${id}`;
         db.exec(`SAVEPOINT ${savepointName}`);
-        txSessions.set(id, { id, savepointName, authSessionId: sessionId! });
+        const timeout = setTimeout(() => {
+          try { settleTransaction(id, false); } catch { /* SQLite is unavailable during shutdown */ }
+        }, INTERACTIVE_TRANSACTION_TIMEOUT_MS);
+        txSessions.set(id, { id, savepointName, authSessionId: sessionId!, ownerWebContentsId: event.sender.id, timeout });
+        watchTransactionOwner(event.sender);
         return { success: true, sessionId: id };
       } catch (err) {
         releaseTransactionSlot(id);
@@ -496,7 +577,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     } catch (err) {
       const txSession = txSessions.get(txId);
       if (txSession) {
-        try { getDb().exec(`ROLLBACK TO ${txSession.savepointName}`); getDb().exec(`SAVEPOINT ${txSession.savepointName}`); } catch { /* ignore */ }
+        try { getDb().exec(`ROLLBACK TO ${txSession.savepointName}`); } catch { /* ignore */ }
       }
       return { success: false, error: err instanceof Error ? err.message : 'Query failed', rows: [] };
     }
@@ -519,7 +600,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     } catch (err) {
       const txSession = txSessions.get(txId);
       if (txSession) {
-        try { getDb().exec(`ROLLBACK TO ${txSession.savepointName}`); getDb().exec(`SAVEPOINT ${txSession.savepointName}`); } catch { /* ignore */ }
+        try { getDb().exec(`ROLLBACK TO ${txSession.savepointName}`); } catch { /* ignore */ }
       }
       return { success: false, error: err instanceof Error ? err.message : 'Execute failed' };
     }
@@ -530,11 +611,10 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     try {
       const session = txSessions.get(txId);
       if (!session) return { success: false, error: 'Transaction session not found' };
-      getDb().exec(`RELEASE ${session.savepointName}`);
-      txSessions.delete(txId);
-      releaseTransactionSlot(txId);
+      settleTransaction(txId, true);
       return { success: true };
     } catch (err) {
+      try { settleTransaction(txId, false); } catch { /* preserve the commit error */ }
       return { success: false, error: err instanceof Error ? err.message : 'Commit failed' };
     }
   });
@@ -544,14 +624,10 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     try {
       const session = txSessions.get(txId);
       if (!session) return { success: false, error: 'Transaction session not found' };
-      getDb().exec(`ROLLBACK TO ${session.savepointName}`);
-      getDb().exec(`RELEASE ${session.savepointName}`);
+      settleTransaction(txId, false);
       return { success: true };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Rollback failed' };
-    } finally {
-      txSessions.delete(txId);
-      releaseTransactionSlot(txId);
     }
   });
 
@@ -703,7 +779,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         const color = (v.color || '').trim();
         const size = (v.size || '').trim();
         if (!color || !size) return { success: false, error: 'Variant color and size are required' };
-        const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
+        const key = `${normalizeArabicSearch(color)}|${normalizeArabicSearch(size)}`;
         if (seen.has(key)) return { success: false, error: `Duplicate variant: ${color} / ${size}` };
         seen.add(key);
         if (!Number.isFinite(v.quantity) || v.quantity < 0) return { success: false, error: 'Variant quantities must be non-negative' };
@@ -758,7 +834,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         // Build lookup of existing variants by lowercase color|size
         const existingMap = new Map<string, { id: number; quantity: number; is_active: number }>();
         for (const e of existing) {
-          existingMap.set(`${(e.color || '').toLowerCase()}|${(e.size || '').toLowerCase()}`, { id: e.id, quantity: e.quantity, is_active: e.is_active });
+          existingMap.set(`${normalizeArabicSearch(e.color || '')}|${normalizeArabicSearch(e.size || '')}`, { id: e.id, quantity: e.quantity, is_active: e.is_active });
         }
 
         // Build set of desired variant keys
@@ -778,7 +854,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         for (const v of payload.variants) {
           const color = v.color.trim();
           const size = v.size.trim();
-          const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
+          const key = `${normalizeArabicSearch(color)}|${normalizeArabicSearch(size)}`;
           desiredKeys.add(key);
 
           const ex = existingMap.get(key);
@@ -821,6 +897,102 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       const msg = err instanceof Error ? err.message : 'Failed to save product';
       const friendly = msg.includes('unique') || msg.includes('UNIQUE') ? 'SKU or barcode already exists' : msg;
       return { success: false, error: friendly };
+    }
+  });
+
+  // ─── Permanent deletion of inactive catalog records ────────
+  // Deletion is deliberately narrow: sales, refunds, and stock history must
+  // remain intact, so records that appear in those workflows can be archived
+  // or disabled but cannot be permanently removed.
+  ipcMain.handle('db:deleteProduct', async (_event, productId: number, sessionId?: number) => {
+    try {
+      const validation = validateSession(sessionId);
+      if (!validation.ok) return { success: false, error: validation.error };
+      const permission = requirePermission(sessionId!, 'products');
+      if (!permission.ok) return { success: false, error: permission.error };
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return { success: false, error: 'Invalid product' };
+      }
+
+      const db = getDb();
+      const product = db.prepare('SELECT id, name FROM products WHERE id = ?').get(productId) as { id: number; name: string } | undefined;
+      if (!product) return { success: false, error: 'Product not found' };
+
+      const hasHistory = db.prepare(
+        `SELECT EXISTS(SELECT 1 FROM sale_items WHERE product_id = ?)
+         OR EXISTS(SELECT 1 FROM refund_items WHERE product_id = ?) AS has_history`
+      ).get(productId, productId) as { has_history: number };
+      if (hasHistory.has_history) {
+        return { success: false, error: 'Products with sales or refunds cannot be deleted. Archive the product instead.' };
+      }
+
+      const session = getSession(sessionId!)!;
+      db.transaction(() => {
+        db.prepare('DELETE FROM barcode_labels WHERE product_id = ?').run(productId);
+        db.prepare('DELETE FROM inventory_movements WHERE product_id = ?').run(productId);
+        db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(productId);
+        db.prepare('DELETE FROM products WHERE id = ?').run(productId);
+        db.prepare(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, previous_value)
+           VALUES (?, 'product_delete', 'product', ?, ?)`
+        ).run(session.userId, productId, JSON.stringify(product));
+      })();
+
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to delete product' };
+    }
+  });
+
+  ipcMain.handle('db:deleteUser', async (_event, userId: number, sessionId?: number) => {
+    try {
+      const validation = validateSession(sessionId);
+      if (!validation.ok) return { success: false, error: validation.error };
+      const permission = requirePermission(sessionId!, 'users');
+      if (!permission.ok) return { success: false, error: permission.error };
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return { success: false, error: 'Invalid user' };
+      }
+
+      const session = getSession(sessionId!)!;
+      if (userId === session.userId) {
+        return { success: false, error: 'You cannot delete your own account' };
+      }
+
+      const db = getDb();
+      const target = db.prepare(
+        `SELECT u.id, u.username, u.display_name, r.name AS role_name
+         FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?`
+      ).get(userId) as { id: number; username: string; display_name: string; role_name: string } | undefined;
+      if (!target) return { success: false, error: 'User not found' };
+      if (target.role_name === 'owner') {
+        return { success: false, error: 'The primary owner account cannot be deleted' };
+      }
+
+      const hasHistory = db.prepare(
+        `SELECT EXISTS(SELECT 1 FROM sales WHERE cashier_id = ?)
+         OR EXISTS(SELECT 1 FROM refunds WHERE cashier_id = ?)
+         OR EXISTS(SELECT 1 FROM expenses WHERE user_id = ?)
+         OR EXISTS(SELECT 1 FROM inventory_movements WHERE user_id = ?)
+         OR EXISTS(SELECT 1 FROM barcode_labels WHERE user_id = ?) AS has_history`
+      ).get(userId, userId, userId, userId, userId) as { has_history: number };
+      if (hasHistory.has_history) {
+        return { success: false, error: 'Users with recorded activity cannot be deleted. Disable the account instead.' };
+      }
+
+      db.transaction(() => {
+        db.prepare('DELETE FROM user_sessions WHERE user_id = ?').run(userId);
+        db.prepare('UPDATE audit_logs SET user_id = NULL WHERE user_id = ?').run(userId);
+        db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+        db.prepare(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, previous_value)
+           VALUES (?, 'user_delete', 'user', ?, ?)`
+        ).run(session.userId, userId, JSON.stringify(target));
+      })();
+
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to delete user' };
     }
   });
 
@@ -898,8 +1070,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       if (result.canceled || !result.filePath) {
         return { success: false, canceled: true };
       }
-      const dbPath = getDatabasePath();
-      copyFileSync(dbPath, result.filePath);
+      await backupTo(result.filePath);
       return { success: true, path: result.filePath };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Export failed' };
@@ -945,7 +1116,12 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       if (options?.printerName) (printOptions as Record<string, unknown>).deviceName = options.printerName;
       if (options?.pageSize) (printOptions as Record<string, unknown>).pageSize = options.pageSize;
       if (options?.margins) (printOptions as Record<string, unknown>).margins = options.margins;
-      await printWindow.webContents.print(printOptions);
+      await new Promise<void>((resolve, reject) => {
+        printWindow!.webContents.print(printOptions, (success, failureReason) => {
+          if (success) resolve();
+          else reject(new Error(failureReason || 'Printing failed'));
+        });
+      });
       printWindow.close();
       return { success: true };
     } catch (err) {

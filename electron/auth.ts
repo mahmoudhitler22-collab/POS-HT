@@ -26,6 +26,7 @@ export interface AuthUser {
   role_id: number;
   role_name: string;
   is_active: number;
+  must_change_password: number;
   permissions: Record<string, boolean>;
   created_at: string;
   updated_at: string;
@@ -36,6 +37,7 @@ export interface SessionInfo {
   sessionId: number;       // DB-side session row id (user_sessions.id)
   permissions: Record<string, boolean>;
   role_name: string;
+  mustChangePassword: boolean;
 }
 
 // ─── In-memory session store ───────────────────────────────
@@ -100,13 +102,13 @@ const OWNER_PERMISSIONS = JSON.stringify({
 
 export function seedOwnerAccount(): void {
   const db = getDb();
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get('mahmoud');
-  if (existing) return;
+  const { count } = db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
+  if (count > 0) return;
 
   const { hash, salt } = hashPassword('Mahmoud79');
   db.prepare(
-    `INSERT INTO users (username, password_hash, password_salt, display_name, role_id, permissions)
-     VALUES (?, ?, ?, ?, 1, ?)`
+    `INSERT INTO users (username, password_hash, password_salt, display_name, role_id, must_change_password, permissions)
+     VALUES (?, ?, ?, ?, 1, 1, ?)`
   ).run('mahmoud', hash, salt, 'Mahmoud', OWNER_PERMISSIONS);
 
   console.log('[Auth] Default owner account "mahmoud" created');
@@ -123,9 +125,9 @@ export function getSession(sessionId: number | undefined): SessionInfo | null {
   return sessions.get(sessionId) ?? null;
 }
 
-function createSession(userId: number, dbSessionId: number, perms: Record<string, boolean>, roleName: string): number {
+function createSession(userId: number, dbSessionId: number, perms: Record<string, boolean>, roleName: string, mustChangePassword: boolean): number {
   const sid = ++sessionCounter;
-  sessions.set(sid, { userId, sessionId: dbSessionId, permissions: perms, role_name: roleName });
+  sessions.set(sid, { userId, sessionId: dbSessionId, permissions: perms, role_name: roleName, mustChangePassword });
   return sid;
 }
 
@@ -136,7 +138,7 @@ export function login(username: string, password: string): { success: boolean; e
   const row = db.prepare(
     `SELECT u.*, r.name as role_name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.username = ?`
   ).get(username) as
-    | { id: number; username: string; display_name: string; role_id: number; role_name: string; is_active: number; password_hash: string; password_salt: string; permissions: string; created_at: string; updated_at: string }
+    | { id: number; username: string; display_name: string; role_id: number; role_name: string; is_active: number; must_change_password: number; password_hash: string; password_salt: string; permissions: string; created_at: string; updated_at: string }
     | undefined;
 
   if (!row) return { success: false, error: 'User not found' };
@@ -159,7 +161,7 @@ export function login(username: string, password: string): { success: boolean; e
   const perms = applyRolePermissionFixes(parsePermissionsJson(row.permissions), row.role_name);
 
   const sessionRes = db.prepare('INSERT INTO user_sessions (user_id) VALUES (?) RETURNING id').get(row.id) as { id: number };
-  const sid = createSession(row.id, sessionRes.id, perms, row.role_name);
+  const sid = createSession(row.id, sessionRes.id, perms, row.role_name, row.must_change_password === 1);
 
   const user: AuthUser = {
     id: row.id,
@@ -168,6 +170,7 @@ export function login(username: string, password: string): { success: boolean; e
     role_id: row.role_id,
     role_name: row.role_name,
     is_active: row.is_active,
+    must_change_password: row.must_change_password,
     permissions: perms,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -182,6 +185,22 @@ export function logout(sessionId: number): void {
   const db = getDb();
   db.prepare("UPDATE user_sessions SET logout_at = datetime('now') WHERE id = ?").run(s.sessionId);
   sessions.delete(sessionId);
+}
+
+export function changeInitialPassword(sessionId: number, password: string): { success: boolean; error?: string } {
+  const session = sessions.get(sessionId);
+  if (!session) return { success: false, error: 'Not authenticated. Please log in again.' };
+  if (!session.mustChangePassword) return { success: false, error: 'A password change is not required for this session.' };
+  if (typeof password !== 'string' || password.length < 10) {
+    return { success: false, error: 'Password must contain at least 10 characters.' };
+  }
+
+  const { hash, salt } = hashPassword(password);
+  getDb().prepare(
+    "UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 0, updated_at = datetime('now') WHERE id = ?"
+  ).run(hash, salt, session.userId);
+  session.mustChangePassword = false;
+  return { success: true };
 }
 
 /**
@@ -199,14 +218,14 @@ export function restoreSession(previousSessionId: number): { success: boolean; s
   const row = db.prepare(
     `SELECT u.*, r.name as role_name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ? AND u.is_active = 1`
   ).get(oldSession.userId) as
-    | { id: number; username: string; display_name: string; role_id: number; role_name: string; is_active: number; permissions: string; created_at: string; updated_at: string }
+    | { id: number; username: string; display_name: string; role_id: number; role_name: string; is_active: number; must_change_password: number; permissions: string; created_at: string; updated_at: string }
     | undefined;
 
   if (!row) return { success: false };
 
   const perms = applyRolePermissionFixes(parsePermissionsJson(row.permissions), row.role_name);
   const sessionRes = db.prepare('INSERT INTO user_sessions (user_id) VALUES (?) RETURNING id').get(row.id) as { id: number };
-  const sid = createSession(row.id, sessionRes.id, perms, row.role_name);
+  const sid = createSession(row.id, sessionRes.id, perms, row.role_name, row.must_change_password === 1);
 
   const user: AuthUser = {
     id: row.id,
@@ -215,6 +234,7 @@ export function restoreSession(previousSessionId: number): { success: boolean; s
     role_id: row.role_id,
     role_name: row.role_name,
     is_active: row.is_active,
+    must_change_password: row.must_change_password,
     permissions: perms,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -260,8 +280,9 @@ function parsePermissionsJson(json: string): Record<string, boolean> {
 // Keep existing manager accounts aligned with the documented system role after
 // refunds were added to that role, without changing any other custom grants.
 function applyRolePermissionFixes(perms: Record<string, boolean>, roleName: string): Record<string, boolean> {
-  if (roleName !== 'manager') return perms;
-  return { ...perms, refunds: true };
+  if (roleName === 'manager') return { ...perms, refunds: true };
+  if (roleName === 'cashier' || roleName === 'inventory') return { ...perms, customers: true };
+  return perms;
 }
 
 // ─── SQL-based permission classification ──────────────────
@@ -460,12 +481,6 @@ const TABLE_PERMISSIONS: Record<string, {
     update: 'users',
     delete: 'users',
   },
-  user_sessions: {
-    select: null,
-    insert: null,
-    update: null,
-    delete: null,
-  },
   settings: {
     select: null,
     insert: 'settings',
@@ -474,7 +489,7 @@ const TABLE_PERMISSIONS: Record<string, {
   },
   audit_logs: {
     select: 'audit',
-    insert: null,
+    insert: 'audit',
     update: 'audit',
     delete: 'audit',
   },
@@ -483,12 +498,6 @@ const TABLE_PERMISSIONS: Record<string, {
     insert: 'products',
     update: 'products',
     delete: 'products',
-  },
-  schema_meta: {
-    select: null,
-    insert: null,
-    update: null,
-    delete: null,
   },
 };
 
@@ -507,15 +516,19 @@ const COST_COLUMNS = ['PURCHASE_COST', 'COST_AT_SALE', 'COST_OF_GOODS', 'GROSS_P
 function checkSqlForCostData(sessionId: number, sql: string, op: SqlOp): { ok: boolean; error?: string } {
   const upper = sql.toUpperCase();
   const hasCostCol = COST_COLUMNS.some((c) => upper.includes(c));
-  if (!hasCostCol) return { ok: true };
+  const selectedColumns = op === 'select' ? upper.match(/\bSELECT\s+([\s\S]*?)\s+\bFROM\b/)?.[1] ?? '' : '';
+  const selectsAllColumns = /(^|,)\s*(?:[A-Z_][A-Z0-9_]*\.)?\*\s*(,|$)/.test(selectedColumns);
+  const accessesProductCost = selectsAllColumns && /\b(?:FROM|JOIN)\s+(?:PRODUCTS|PRODUCT_VARIANTS)\b/.test(upper);
+  const accessesSaleCost = selectsAllColumns && /\b(?:FROM|JOIN)\s+SALE_ITEMS\b/.test(upper);
+  if (!hasCostCol && !accessesProductCost && !accessesSaleCost) return { ok: true };
 
   if (op === 'select') {
     // purchase_cost on products table → products.view_cost
     // cost_at_sale / gross_profit / net_profit → profit
-    if (upper.includes('COST_AT_SALE') || upper.includes('GROSS_PROFIT') || upper.includes('NET_PROFIT') || upper.includes('COST_OF_GOODS')) {
+    if (accessesSaleCost || upper.includes('COST_AT_SALE') || upper.includes('GROSS_PROFIT') || upper.includes('NET_PROFIT') || upper.includes('COST_OF_GOODS')) {
       return requirePermission(sessionId, 'profit');
     }
-    if (upper.includes('PURCHASE_COST')) {
+    if (accessesProductCost || upper.includes('PURCHASE_COST')) {
       return requirePermission(sessionId, 'products.view_cost');
     }
     return { ok: true };
@@ -564,6 +577,13 @@ export function checkSqlPermission(sessionId: number, sql: string): { ok: boolea
     return { ok: false, error: 'Permission denied: unrecognized or unsupported SQL statement' };
   }
 
+  // Product and user removal must go through their dedicated IPC handlers.
+  // Those handlers keep the audit trail and prevent deleting records that are
+  // needed by sales, refunds, inventory history, or the primary owner account.
+  if (tableAccesses.some(({ table, op }) => op === 'delete' && (table === 'products' || table === 'users'))) {
+    return { ok: false, error: 'Permission denied: use the dedicated deletion operation' };
+  }
+
   for (const { table, op } of tableAccesses) {
     const tableConfig = TABLE_PERMISSIONS[table];
     if (!tableConfig) {
@@ -598,15 +618,26 @@ function collectTableAccesses(sql: string): Array<{ table: string; op: SqlOp }> 
   };
 
   const patterns: Array<{ pattern: RegExp; op: SqlOp }> = [
-    { pattern: /\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)/gi, op: 'insert' },
-    { pattern: /\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)/gi, op: 'update' },
+    { pattern: /\bINSERT(?:\s+OR\s+(?:ABORT|FAIL|IGNORE|REPLACE|ROLLBACK))?\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)/gi, op: 'insert' },
+    // `ON CONFLICT (...) DO UPDATE SET ...` is part of an INSERT upsert,
+    // not a second UPDATE statement against a table named "SET".
+    { pattern: /\bUPDATE\s+(?!SET\b)([A-Za-z_][A-Za-z0-9_]*)/gi, op: 'update' },
     { pattern: /\bDELETE\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)/gi, op: 'delete' },
-    { pattern: /\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)/gi, op: 'select' },
     { pattern: /\bJOIN\s+([A-Za-z_][A-Za-z0-9_]*)/gi, op: 'select' },
   ];
 
   for (const { pattern, op } of patterns) {
     for (const match of sql.matchAll(pattern)) add(match[1], op);
+  }
+
+  // A FROM clause may list more than one table (`FROM settings, users`).
+  // Inspect each comma-separated source rather than only the first one.
+  const fromClause = /\bFROM\s+([\s\S]*?)(?=\b(?:WHERE|GROUP|ORDER|HAVING|LIMIT|UNION|LEFT|RIGHT|INNER|FULL|CROSS|JOIN|ON)\b|$)/gi;
+  for (const match of sql.matchAll(fromClause)) {
+    for (const source of match[1].split(',')) {
+      const table = source.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
+      if (table) add(table, 'select');
+    }
   }
 
   return [...accesses].flatMap(([table, operations]) =>

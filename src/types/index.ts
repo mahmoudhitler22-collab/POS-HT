@@ -7,6 +7,7 @@ export interface User {
   role_id: number;
   role_name?: string;
   is_active: number;
+  must_change_password?: number;
   permissions: PermissionSet;
   created_at: string;
   updated_at: string;
@@ -103,6 +104,7 @@ export interface SaleItem {
   id: number;
   sale_id: number;
   product_id: number;
+  variant_id: number | null;
   product_name: string;
   unit_price: number;
   quantity: number;
@@ -138,6 +140,7 @@ export interface RefundItem {
   refund_id: number;
   sale_item_id: number;
   product_id: number;
+  variant_id: number | null;
   product_name: string;
   quantity: number;
   unit_price: number;
@@ -188,6 +191,8 @@ export interface Setting {
 
 export interface CartItem {
   product_id: number;
+  variant_id: number | null;
+  variant_label: string | null;
   name: string;
   barcode: string | null;
   unit_price: number;

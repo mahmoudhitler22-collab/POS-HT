@@ -6,7 +6,8 @@ import { generateReceiptHtml, printHtml, getPrinters, type PrinterInfo } from '@
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { toast } from '@/components/ui/Toast';
-import { Printer, X, Loader2 } from 'lucide-react';
+import { Printer, Loader2 } from 'lucide-react';
+import { useLanguage } from '@/context/LanguageContext';
 
 interface ReceiptData {
   sale: {
@@ -31,6 +32,7 @@ interface ReceiptData {
 
 export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => void }) {
   const { get } = useSettings();
+  const { isArabic } = useLanguage();
   const [data, setData] = useState<ReceiptData | null>(null);
   const [printers, setPrinters] = useState<PrinterInfo[]>([]);
   const [selectedPrinter, setSelectedPrinter] = useState<string>('');
@@ -96,6 +98,7 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
       discountAmount: data.sale.discount_amount,
       total: data.sale.total,
       paymentMethod: data.sale.payment_method,
+      language: isArabic ? 'ar' : 'en',
     });
 
     const result = await printHtml(html, {
@@ -163,11 +166,11 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
           </div>
           <div className="flex justify-between">
             <span>Date:</span>
-            <span>{date.toLocaleDateString()}</span>
+            <span>{date.toLocaleDateString(isArabic ? 'ar-EG' : 'en-US')}</span>
           </div>
           <div className="flex justify-between">
             <span>Time:</span>
-            <span>{date.toLocaleTimeString()}</span>
+            <span>{date.toLocaleTimeString(isArabic ? 'ar-EG' : 'en-US')}</span>
           </div>
           <div className="flex justify-between">
             <span>Cashier:</span>

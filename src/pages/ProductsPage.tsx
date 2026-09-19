@@ -1,17 +1,16 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { query, execute, transaction, isRunningInElectron, getAuthSessionId } from '@/db/client';
+import { query, execute, transaction, isRunningInElectron, getAuthSessionId, deleteProduct } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { logAudit } from '@/lib/audit';
-import { formatEgp, formatQuantity } from '@/lib/money';
-import { toPiasters } from '@/lib/money';
-import { arabicSearchPattern, normalizeArabicSql } from '@/lib/search';
+import { formatEgp, formatQuantity, parseLocalizedNumber, toPiasters } from '@/lib/money';
+import { arabicSearchPattern, normalizeArabicSearch, normalizeArabicSql } from '@/lib/search';
 import { toast } from '@/components/ui/Toast';
 import { Button } from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal, ConfirmDialog } from '@/components/ui/Modal';
 import type { Product, ProductVariant, Category, Brand, Supplier } from '@/types';
-import { Plus, Search, Pencil, Archive, RotateCcw, Package, Barcode, TriangleAlert as AlertTriangle, X, Tag, Folder, Building2, Truck, Printer, Loader as Loader2, Grid3x3, Palette, Ruler } from 'lucide-react';
+import { Plus, Search, Pencil, Archive, RotateCcw, Package, Barcode, TriangleAlert as AlertTriangle, X, Tag, Folder, Truck, Printer, Loader as Loader2, Grid3x3, Palette, Ruler, Trash2 } from 'lucide-react';
 import { useSettings } from '@/context/SettingsContext';
 import { useLanguage } from '@/context/LanguageContext';
 import { generateLabelHtml, printHtml, getPrinters, type PrinterInfo } from '@/lib/print';
@@ -30,6 +29,7 @@ export function ProductsPage() {
   const [showArchived, setShowArchived] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<Product | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
   const [labelTarget, setLabelTarget] = useState<Product | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -89,7 +89,7 @@ export function ProductsPage() {
     }
     if (filterSize) {
       sql += ` AND ${normalizeArabicSql('p.size')} = $${paramIdx}`;
-      params.push(arabicSearchPattern(filterSize).slice(1, -1));
+      params.push(normalizeArabicSearch(filterSize));
       paramIdx++;
     }
     if (filterColor) {
@@ -116,8 +116,20 @@ export function ProductsPage() {
       new_value: 'archived',
     });
     toast('success', `Product "${product.name}" archived`);
-    setDeleteTarget(null);
+    setArchiveTarget(null);
     loadProducts();
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      await deleteProduct(deleteTarget.id);
+      toast('success', `Product "${deleteTarget.name}" deleted`);
+      setDeleteTarget(null);
+      loadProducts();
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'Failed to delete product');
+    }
   };
 
   const handleRestore = async (product: Product) => {
@@ -280,7 +292,7 @@ export function ProductsPage() {
                                 </button>
                                 {hasPermission('products') && (
                                   <button
-                                    onClick={() => setDeleteTarget(p)}
+                                    onClick={() => setArchiveTarget(p)}
                                     className="p-1.5 rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-600"
                                     title="Archive"
                                   >
@@ -298,6 +310,15 @@ export function ProductsPage() {
                                   <RotateCcw size={16} />
                                 </button>
                               )
+                            )}
+                            {hasPermission('products') && (
+                              <button
+                                onClick={() => setDeleteTarget(p)}
+                                className="p-1.5 rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-600"
+                                title="Delete permanently"
+                              >
+                                <Trash2 size={16} />
+                              </button>
                             )}
                           </div>
                         </td>
@@ -331,11 +352,19 @@ export function ProductsPage() {
       )}
 
       <ConfirmDialog
-        open={!!deleteTarget}
+        open={!!archiveTarget}
         title="Archive Product"
-        message={`Archive "${deleteTarget?.name}"? The product will be hidden from the active list but kept in the database. Historical sales remain intact.`}
+        message={`Archive "${archiveTarget?.name}"? The product will be hidden from the active list but kept in the database. Historical sales remain intact.`}
         confirmLabel="Archive"
-        onConfirm={() => deleteTarget && handleArchive(deleteTarget)}
+        onConfirm={() => archiveTarget && handleArchive(archiveTarget)}
+        onCancel={() => setArchiveTarget(null)}
+      />
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete Product Permanently"
+        message={`Permanently delete "${deleteTarget?.name}"? This cannot be undone. Products with sales or refunds must be archived instead.`}
+        confirmLabel="Delete"
+        onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
       />
     </div>
@@ -358,7 +387,7 @@ function ProductFormModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const { user, hasPermission } = useAuth();
+  const { user } = useAuth();
   const { t } = useLanguage();
   const [form, setForm] = useState({
     name: product?.name || '',
@@ -390,7 +419,7 @@ function ProductFormModal({
   const addColor = () => {
     const trimmed = newColor.trim();
     if (!trimmed) return;
-    if (colors.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
+    if (colors.some((c) => normalizeArabicSearch(c) === normalizeArabicSearch(trimmed))) {
       toast('error', t('Duplicate color name'));
       return;
     }
@@ -418,7 +447,7 @@ function ProductFormModal({
   const addSize = () => {
     const trimmed = newSize.trim();
     if (!trimmed) return;
-    if (sizes.some((s) => s.toLowerCase() === trimmed.toLowerCase())) {
+    if (sizes.some((s) => normalizeArabicSearch(s) === normalizeArabicSearch(trimmed))) {
       toast('error', t('Duplicate size name'));
       return;
     }
@@ -505,7 +534,7 @@ function ProductFormModal({
       for (const s of sizes) {
         const cell = matrix[cellKey(c, s)];
         if (cell?.active) {
-          const qty = parseFloat(cell.quantity) || 0;
+          const qty = parseLocalizedNumber(cell.quantity) || 0;
           variants.push({
             color: c.trim(),
             size: s.trim(),
@@ -542,7 +571,7 @@ function ProductFormModal({
       }
 
       const variants = collectVariants();
-      const minStock = parseFloat(form.min_stock_level) || 0;
+      const minStock = parseLocalizedNumber(form.min_stock_level) || 0;
 
       const productPayload = {
         name: form.name,
@@ -628,14 +657,14 @@ function ProductFormModal({
           );
           const existingMap = new Map<string, { id: number; quantity: number; is_active: number }>();
           for (const e of existingRes.rows) {
-            existingMap.set(`${(e.color || '').toLowerCase()}|${(e.size || '').toLowerCase()}`, { id: e.id, quantity: e.quantity, is_active: e.is_active });
+            existingMap.set(`${normalizeArabicSearch(e.color || '')}|${normalizeArabicSearch(e.size || '')}`, { id: e.id, quantity: e.quantity, is_active: e.is_active });
           }
 
           const desiredKeys = new Set<string>();
           for (const v of variants) {
             const color = v.color.trim();
             const size = v.size.trim();
-            const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
+            const key = `${normalizeArabicSearch(color)}|${normalizeArabicSearch(size)}`;
             desiredKeys.add(key);
 
             const ex = existingMap.get(key);
@@ -859,7 +888,8 @@ function ProductFormModal({
                             {isActive ? (
                               <div className="flex flex-col items-center gap-1">
                                 <input
-                                  type="number"
+                                  type="text"
+                                  inputMode="decimal"
                                   min="0"
                                   step="0.01"
                                   value={cell?.quantity ?? '0'}
@@ -1239,11 +1269,12 @@ function LabelPrintModal({ product, onClose }: { product: Product; onClose: () =
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">Number of Labels</label>
           <input
-            type="number"
+            type="text"
+            inputMode="numeric"
             min="1"
             max="1000"
             value={copies}
-            onChange={(e) => setCopies(Math.max(1, Math.min(1000, parseInt(e.target.value, 10) || 1)))}
+            onChange={(e) => setCopies(Math.max(1, Math.min(1000, parseLocalizedNumber(e.target.value) || 1)))}
             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
           />
           <p className="text-xs text-slate-400 mt-1">Maximum 1000 labels per print</p>

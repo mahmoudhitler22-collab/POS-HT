@@ -6,6 +6,7 @@ import { toast } from '@/components/ui/Toast';
 import { Button } from '@/components/ui/Button';
 import { Input, Textarea } from '@/components/ui/Input';
 import { useAuth } from '@/context/AuthContext';
+import { normalizeLocalizedNumber } from '@/lib/money';
 import {
   Settings as SettingsIcon, Store, CreditCard, Star, Save, Plus, X, Percent
 } from 'lucide-react';
@@ -55,11 +56,11 @@ export function SettingsPage() {
       currency_symbol: currencySymbol,
       allow_negative_stock: allowNegativeStock ? '1' : '0',
       loyalty_enabled: loyaltyEnabled ? '1' : '0',
-      loyalty_points_per_1000_egp: loyaltyPointsPer1000,
+      loyalty_points_per_1000_egp: normalizeLocalizedNumber(loyaltyPointsPer1000),
       receipt_footer: receiptFooter,
       invoice_prefix: invoicePrefix,
       payment_methods: JSON.stringify(paymentMethods),
-      max_discount_percentage: maxDiscountPct,
+      max_discount_percentage: normalizeLocalizedNumber(maxDiscountPct),
     };
 
     try {

@@ -38,6 +38,7 @@ export async function printHtml(
 // ─── Receipt HTML ─────────────────────────────────────────
 
 export interface ReceiptData {
+  language?: 'ar' | 'en';
   storeName: string;
   storeAddress: string;
   storePhone: string;
@@ -60,6 +61,20 @@ export interface ReceiptData {
 }
 
 export function generateReceiptHtml(data: ReceiptData): string {
+  const isArabic = data.language === 'ar';
+  const labels = isArabic ? {
+    phone: 'هاتف', invoice: 'الفاتورة', date: 'التاريخ', time: 'الوقت', cashier: 'الكاشير', customer: 'العميل',
+    item: 'الصنف', quantity: 'الكمية', price: 'السعر', total: 'الإجمالي', discount: 'الخصم', subtotal: 'الإجمالي قبل الخصم',
+    payment: 'الدفع', generated: 'إيصال صادر من النظام',
+  } : {
+    phone: 'Tel', invoice: 'Invoice', date: 'Date', time: 'Time', cashier: 'Cashier', customer: 'Customer',
+    item: 'Item', quantity: 'Qty', price: 'Price', total: 'Total', discount: 'Discount', subtotal: 'Subtotal',
+    payment: 'Payment', generated: 'Computer-generated receipt',
+  };
+  const paymentMethod = isArabic
+    ? ({ Cash: 'نقدي', 'Card / Visa': 'بطاقة / فيزا', Instapay: 'إنستاباي', Other: 'أخرى' }[data.paymentMethod] ?? data.paymentMethod)
+    : data.paymentMethod;
+  const locale = isArabic ? 'ar-EG' : 'en-US';
   const itemsHtml = data.items.map((item) => `
     <tr>
       <td class="item-name">${escapeHtml(item.product_name)}</td>
@@ -67,7 +82,7 @@ export function generateReceiptHtml(data: ReceiptData): string {
       <td class="price">${formatEgp(item.unit_price)}</td>
       <td class="total">${formatEgp(item.line_total)}</td>
     </tr>
-    ${item.discount_amount > 0 ? `<tr><td colspan="4" class="discount-line">Discount: -${formatEgp(item.discount_amount)}</td></tr>` : ''}
+    ${item.discount_amount > 0 ? `<tr><td colspan="4" class="discount-line">${labels.discount}: -${formatEgp(item.discount_amount)}</td></tr>` : ''}
   `).join('');
 
   return `<!DOCTYPE html>
@@ -77,12 +92,13 @@ export function generateReceiptHtml(data: ReceiptData): string {
 <style>
   @page { margin: 0; }
   body {
-    font-family: 'Courier New', monospace;
+    font-family: ${isArabic ? "Tahoma, Arial, sans-serif" : "'Courier New', monospace"};
     font-size: 12px;
     color: #000;
     width: 80mm;
     margin: 0 auto;
     padding: 4mm;
+    direction: ${isArabic ? 'rtl' : 'ltr'};
   }
   .header { text-align: center; margin-bottom: 8px; }
   .header h2 { font-size: 18px; font-weight: bold; margin: 0; }
@@ -105,34 +121,34 @@ export function generateReceiptHtml(data: ReceiptData): string {
   <div class="header">
     <h2>${escapeHtml(data.storeName)}</h2>
     ${data.storeAddress ? `<p>${escapeHtml(data.storeAddress)}</p>` : ''}
-    ${data.storePhone ? `<p>Tel: ${escapeHtml(data.storePhone)}</p>` : ''}
+    ${data.storePhone ? `<p>${labels.phone}: ${escapeHtml(data.storePhone)}</p>` : ''}
   </div>
   <div class="divider"></div>
   <div class="info">
-    <div class="info-row"><span>Invoice:</span><span><b>${escapeHtml(data.invoiceNumber)}</b></span></div>
-    <div class="info-row"><span>Date:</span><span>${data.date.toLocaleDateString()}</span></div>
-    <div class="info-row"><span>Time:</span><span>${data.date.toLocaleTimeString()}</span></div>
-    <div class="info-row"><span>Cashier:</span><span>${escapeHtml(data.cashierName)}</span></div>
-    ${data.customerName ? `<div class="info-row"><span>Customer:</span><span>${escapeHtml(data.customerName)}</span></div>` : ''}
+    <div class="info-row"><span>${labels.invoice}:</span><span><b>${escapeHtml(data.invoiceNumber)}</b></span></div>
+    <div class="info-row"><span>${labels.date}:</span><span>${data.date.toLocaleDateString(locale)}</span></div>
+    <div class="info-row"><span>${labels.time}:</span><span>${data.date.toLocaleTimeString(locale)}</span></div>
+    <div class="info-row"><span>${labels.cashier}:</span><span>${escapeHtml(data.cashierName)}</span></div>
+    ${data.customerName ? `<div class="info-row"><span>${labels.customer}:</span><span>${escapeHtml(data.customerName)}</span></div>` : ''}
   </div>
   <div class="divider"></div>
   <table>
     <thead>
-      <tr><th>Item</th><th class="qty">Qty</th><th class="price">Price</th><th class="total">Total</th></tr>
+      <tr><th>${labels.item}</th><th class="qty">${labels.quantity}</th><th class="price">${labels.price}</th><th class="total">${labels.total}</th></tr>
     </thead>
     <tbody>${itemsHtml}</tbody>
   </table>
   <div class="divider"></div>
   <div class="totals">
-    <div class="info-row"><span>Subtotal:</span><span>${formatEgp(data.subtotal)}</span></div>
-    ${data.discountAmount > 0 ? `<div class="info-row" style="color:#555;"><span>Discount:</span><span>-${formatEgp(data.discountAmount)}</span></div>` : ''}
-    <div class="info-row total-row"><span>TOTAL:</span><span>${formatEgp(data.total)}</span></div>
-    <div class="info-row" style="margin-top:4px;"><span>Payment:</span><span>${escapeHtml(data.paymentMethod)}</span></div>
+    <div class="info-row"><span>${labels.subtotal}:</span><span>${formatEgp(data.subtotal)}</span></div>
+    ${data.discountAmount > 0 ? `<div class="info-row" style="color:#555;"><span>${labels.discount}:</span><span>-${formatEgp(data.discountAmount)}</span></div>` : ''}
+    <div class="info-row total-row"><span>${labels.total}:</span><span>${formatEgp(data.total)}</span></div>
+    <div class="info-row" style="margin-top:4px;"><span>${labels.payment}:</span><span>${escapeHtml(paymentMethod)}</span></div>
   </div>
   <div class="divider"></div>
   <div class="footer">
     <p>${escapeHtml(data.receiptFooter)}</p>
-    <p style="color:#999;">Computer-generated receipt</p>
+    <p style="color:#999;">${labels.generated}</p>
   </div>
 </body>
 </html>`;

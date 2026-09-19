@@ -1,6 +1,5 @@
 import { type ReactNode } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useSettings } from '@/context/SettingsContext';
 import { useLanguage } from '@/context/LanguageContext';
 import { Button } from '@/components/ui/Button';
 import { LanguageToggle } from '@/components/LanguageToggle';
@@ -69,7 +68,6 @@ interface LayoutProps {
 
 export function Layout({ current, onNavigate, children }: LayoutProps) {
   const { user, logout, hasPermission } = useAuth();
-  const { get } = useSettings();
   const { t, isArabic } = useLanguage();
 
   const visibleItems = NAV_ITEMS.filter((item) => hasPermission(item.permission) || (item.altPermission && hasPermission(item.altPermission)));

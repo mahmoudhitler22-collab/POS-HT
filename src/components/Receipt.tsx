@@ -106,6 +106,8 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
     const result = await printHtml(html, {
       silent: !!selectedPrinter,
       printerName: selectedPrinter || undefined,
+      pageSize: { width: 80000, height: 297000 },
+      margins: { marginType: 'none' },
     });
 
     if (result.success) {

@@ -21,7 +21,7 @@ export async function getPrinters(): Promise<PrinterInfo[]> {
 
 export async function printHtml(
   html: string,
-  options?: { silent?: boolean; printerName?: string; pageSize?: { width: number; height: number } }
+  options?: { silent?: boolean; printerName?: string; pageSize?: { width: number; height: number }; margins?: { marginType: 'none' | 'custom'; top?: number; bottom?: number; left?: number; right?: number } }
 ): Promise<{ success: boolean; error?: string }> {
   if (typeof window !== 'undefined' && window.electronAPI) {
     return window.electronAPI.print.print(html, options, getAuthSessionId());

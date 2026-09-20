@@ -65,11 +65,11 @@ export function generateReceiptHtml(data: ReceiptData): string {
   const labels = isArabic ? {
     phone: 'هاتف', invoice: 'الفاتورة', date: 'التاريخ', time: 'الوقت', cashier: 'الكاشير', customer: 'العميل',
     item: 'الصنف', quantity: 'الكمية', price: 'السعر', total: 'الإجمالي', discount: 'الخصم', subtotal: 'الإجمالي قبل الخصم',
-    payment: 'الدفع', generated: 'إيصال صادر من النظام',
+    payment: 'الدفع',
   } : {
     phone: 'Tel', invoice: 'Invoice', date: 'Date', time: 'Time', cashier: 'Cashier', customer: 'Customer',
     item: 'Item', quantity: 'Qty', price: 'Price', total: 'Total', discount: 'Discount', subtotal: 'Subtotal',
-    payment: 'Payment', generated: 'Computer-generated receipt',
+    payment: 'Payment',
   };
   const paymentMethod = isArabic
     ? ({ Cash: 'نقدي', 'Card / Visa': 'بطاقة / فيزا', Instapay: 'إنستاباي', Other: 'أخرى' }[data.paymentMethod] ?? data.paymentMethod)
@@ -101,6 +101,7 @@ export function generateReceiptHtml(data: ReceiptData): string {
     width: 80mm;
     margin: 0 auto;
     padding: 4mm;
+    box-sizing: border-box;
     direction: ${isArabic ? 'rtl' : 'ltr'};
   }
   .header { text-align: center; margin-bottom: 8px; }
@@ -144,14 +145,13 @@ export function generateReceiptHtml(data: ReceiptData): string {
   <div class="divider"></div>
   <div class="totals">
     <div class="info-row"><span>${labels.subtotal}:</span><span>${formatEgp(data.subtotal)}</span></div>
-    ${data.discountAmount > 0 ? `<div class="info-row" style="color:#555;"><span>${labels.discount}:</span><span>-${formatEgp(data.discountAmount)}</span></div>${showSpecialDiscount ? `<div class="info-row" style="color:#555; font-style:italic;"><span>${specialDiscountLabel}</span><span></span></div>` : ''}` : ''}
+    ${Number(data.discountAmount) > 0 ? `<div class="info-row" style="color:#555;"><span>${labels.discount}:</span><span>-${formatEgp(data.discountAmount)}</span></div>${showSpecialDiscount ? `<div class="info-row" style="color:#555; font-style:italic;"><span>${specialDiscountLabel}</span><span></span></div>` : ''}` : ''}
     <div class="info-row total-row"><span>${labels.total}:</span><span>${formatEgp(data.total)}</span></div>
     <div class="info-row" style="margin-top:4px;"><span>${labels.payment}:</span><span>${escapeHtml(paymentMethod)}</span></div>
   </div>
   <div class="divider"></div>
   <div class="footer">
     <p>${escapeHtml(data.receiptFooter)}</p>
-    <p style="color:#999;">${labels.generated}</p>
   </div>
 </body>
 </html>`;

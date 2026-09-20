@@ -218,7 +218,7 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
             <span>Subtotal:</span>
             <span>{formatEgp(data.sale.subtotal)}</span>
           </div>
-          {data.sale.discount_amount > 0 && (
+          {Number(data.sale.discount_amount) > 0 && (
             <div className="flex justify-between text-red-600">
               <span>Discount:</span>
               <span>-{formatEgp(data.sale.discount_amount)}</span>
@@ -243,7 +243,6 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
 
         <div className="text-center text-xs">
           <p>{receiptFooter}</p>
-          <p className="mt-2 text-slate-400">This is a computer-generated receipt</p>
         </div>
       </div>
     </Modal>

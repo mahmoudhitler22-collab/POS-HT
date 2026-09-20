@@ -93,13 +93,14 @@ export function generateReceiptHtml(data: ReceiptData): string {
 <head>
 <meta charset="utf-8">
 <style>
-  @page { margin: 0; }
+  @page { size: 80mm; margin: 0; }
+  html { margin: 0; padding: 0; }
   body {
     font-family: ${isArabic ? "Tahoma, Arial, sans-serif" : "'Courier New', monospace"};
     font-size: 12px;
     color: #000;
     width: 80mm;
-    margin: 0 auto;
+    margin: 0;
     padding: 4mm;
     box-sizing: border-box;
     direction: ${isArabic ? 'rtl' : 'ltr'};
@@ -144,8 +145,7 @@ export function generateReceiptHtml(data: ReceiptData): string {
   </table>
   <div class="divider"></div>
   <div class="totals">
-    <div class="info-row"><span>${labels.subtotal}:</span><span>${formatEgp(data.subtotal)}</span></div>
-    ${Number(data.discountAmount) > 0 ? `<div class="info-row" style="color:#555;"><span>${labels.discount}:</span><span>-${formatEgp(data.discountAmount)}</span></div>${showSpecialDiscount ? `<div class="info-row" style="color:#555; font-style:italic;"><span>${specialDiscountLabel}</span><span></span></div>` : ''}` : ''}
+    ${Number(data.discountAmount) > 0 ? `<div class="info-row"><span>${labels.subtotal}:</span><span>${formatEgp(data.subtotal)}</span></div><div class="info-row" style="color:#555;"><span>${labels.discount}:</span><span>-${formatEgp(data.discountAmount)}</span></div>${showSpecialDiscount ? `<div class="info-row" style="color:#555; font-style:italic;"><span>${specialDiscountLabel}</span><span></span></div>` : ''}` : ''}
     <div class="info-row total-row"><span>${labels.total}:</span><span>${formatEgp(data.total)}</span></div>
     <div class="info-row" style="margin-top:4px;"><span>${labels.payment}:</span><span>${escapeHtml(paymentMethod)}</span></div>
   </div>

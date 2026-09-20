@@ -214,20 +214,22 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
         <div className="border-t border-dashed border-slate-300 my-3" />
 
         <div className="space-y-1 text-xs">
-          <div className="flex justify-between">
-            <span>Subtotal:</span>
-            <span>{formatEgp(data.sale.subtotal)}</span>
-          </div>
           {Number(data.sale.discount_amount) > 0 && (
-            <div className="flex justify-between text-red-600">
-              <span>Discount:</span>
-              <span>-{formatEgp(data.sale.discount_amount)}</span>
-            </div>
-          )}
-          {showSpecialDiscount && (
-            <div className="flex justify-between text-red-600 italic">
-              <span>{isArabic ? 'خصم خاص' : 'Special Discount'}</span>
-            </div>
+            <>
+              <div className="flex justify-between">
+                <span>Subtotal:</span>
+                <span>{formatEgp(data.sale.subtotal)}</span>
+              </div>
+              <div className="flex justify-between text-red-600">
+                <span>Discount:</span>
+                <span>-{formatEgp(data.sale.discount_amount)}</span>
+              </div>
+              {showSpecialDiscount && (
+                <div className="flex justify-between text-red-600 italic">
+                  <span>{isArabic ? 'خصم خاص' : 'Special Discount'}</span>
+                </div>
+              )}
+            </>
           )}
           <div className="flex justify-between text-base font-bold border-t border-slate-300 pt-1 mt-1">
             <span>TOTAL:</span>

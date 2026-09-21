@@ -2,7 +2,11 @@ import { useState, useEffect } from 'react';
 import { query } from '@/db/client';
 import { useSettings } from '@/context/SettingsContext';
 import { formatEgp, formatQuantity } from '@/lib/money';
-import { generateReceiptHtml, printHtml, getPrinters, type PrinterInfo } from '@/lib/print';
+import {
+  generateReceiptHtml, generateCalibrationHtml, socialFooterHtml, printHtml, getPrinters,
+  loadReceiptLayout, saveReceiptLayout, sanitizeReceiptLayout, DEFAULT_RECEIPT_LAYOUT,
+  type PrinterInfo, type ReceiptLayout,
+} from '@/lib/print';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { toast } from '@/components/ui/Toast';
@@ -37,6 +41,7 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
   const [printers, setPrinters] = useState<PrinterInfo[]>([]);
   const [selectedPrinter, setSelectedPrinter] = useState<string>('');
   const [printing, setPrinting] = useState(false);
+  const [layout, setLayout] = useState<ReceiptLayout>(() => loadReceiptLayout());
 
   useEffect(() => {
     (async () => {
@@ -80,17 +85,44 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
   const storeAddress = get('store_address', '');
   const storePhone = get('store_phone', '');
   const receiptFooter = get('receipt_footer', 'Thank you for shopping with us!');
+  const social = {
+    facebookName: get('social_facebook_name', ''),
+    facebookUrl: get('social_facebook_url', ''),
+    instagramName: get('social_instagram_name', ''),
+    tiktokName: get('social_tiktok_name', ''),
+  };
   const date = new Date(data.sale.created_at);
   const discountPercent = data.sale.subtotal > 0 ? (data.sale.discount_amount / data.sale.subtotal) * 100 : 0;
   const showSpecialDiscount = discountPercent > 10;
 
+  const updateLayout = (patch: Partial<ReceiptLayout>) => {
+    const next = sanitizeReceiptLayout({ ...layout, ...patch });
+    setLayout(next);
+    saveReceiptLayout(next);
+  };
+
+  const handleTestPrint = async () => {
+    setPrinting(true);
+    const result = await printHtml(generateCalibrationHtml(isArabic ? 'ar' : 'en', layout.paperMm), {
+      silent: !!selectedPrinter,
+      printerName: selectedPrinter || undefined,
+      pageSize: { width: layout.paperMm * 1000, height: 297000 },
+      margins: { marginType: 'none' },
+    });
+    if (result.success) toast('success', isArabic ? 'تم إرسال ورقة الاختبار' : 'Test sheet sent to printer');
+    else toast('error', result.error || 'Printing failed');
+    setPrinting(false);
+  };
+
   const handlePrint = async () => {
     setPrinting(true);
     const html = generateReceiptHtml({
+      layout,
       storeName,
       storeAddress,
       storePhone,
       receiptFooter,
+      social,
       invoiceNumber: data.sale.invoice_number,
       date,
       cashierName: data.sale.cashier_name,
@@ -106,7 +138,7 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
     const result = await printHtml(html, {
       silent: !!selectedPrinter,
       printerName: selectedPrinter || undefined,
-      pageSize: { width: 80000, height: 297000 },
+      pageSize: { width: layout.paperMm * 1000, height: 297000 },
       margins: { marginType: 'none' },
     });
 
@@ -152,6 +184,48 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
           </select>
         </div>
       )}
+
+      {/* Print margins (measured per printer with the test sheet) */}
+      <details className="mb-4 rounded-lg border border-slate-200 p-3 text-sm">
+        <summary className="cursor-pointer font-medium text-slate-700">
+          {isArabic ? 'ضبط هوامش الطباعة (لو الحروف مقصوصة)' : 'Print margins (if text is cut off)'}
+        </summary>
+        <div className="mt-3 space-y-3">
+          <p className="text-xs text-slate-500">
+            {isArabic
+              ? 'اطبع ورقة الاختبار، ثم اقرأ أول رقم يظهر كاملاً على اليسار وعلى اليمين. اكتب كل رقم زائد واحد في الخانة المناسبة.'
+              : 'Print the test sheet, then read the first fully visible number on the left and on the right. Enter each number plus 1 in the matching box.'}
+          </p>
+          <div className="grid grid-cols-3 gap-2">
+            <label className="text-xs text-slate-600">
+              {isArabic ? 'يسار (مم)' : 'Left (mm)'}
+              <input type="number" min={0} max={30} step={1} value={layout.leftMm}
+                onChange={(e) => updateLayout({ leftMm: Math.round(Number(e.target.value)) })}
+                className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm" />
+            </label>
+            <label className="text-xs text-slate-600">
+              {isArabic ? 'يمين (مم)' : 'Right (mm)'}
+              <input type="number" min={0} max={30} step={1} value={layout.rightMm}
+                onChange={(e) => updateLayout({ rightMm: Math.round(Number(e.target.value)) })}
+                className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm" />
+            </label>
+            <label className="text-xs text-slate-600">
+              {isArabic ? 'أعلى (مم)' : 'Top (mm)'}
+              <input type="number" min={0} max={30} step={1} value={layout.topMm}
+                onChange={(e) => updateLayout({ topMm: Math.round(Number(e.target.value)) })}
+                className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm" />
+            </label>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleTestPrint} disabled={printing}>
+              {isArabic ? 'طباعة ورقة اختبار' : 'Print test sheet'}
+            </Button>
+            <Button variant="outline" onClick={() => updateLayout({ ...DEFAULT_RECEIPT_LAYOUT })}>
+              {isArabic ? 'استرجاع الافتراضي' : 'Reset'}
+            </Button>
+          </div>
+        </div>
+      </details>
 
       {/* Receipt preview */}
       <div className="bg-white p-4 font-mono text-sm text-slate-900 rounded-lg border border-slate-200" style={{ maxWidth: '320px', margin: '0 auto' }}>
@@ -245,6 +319,7 @@ export function Receipt({ saleId, onClose }: { saleId: number; onClose: () => vo
 
         <div className="text-center text-xs">
           <p>{receiptFooter}</p>
+          <div dangerouslySetInnerHTML={{ __html: socialFooterHtml(social, isArabic ? 'ar' : 'en') }} />
         </div>
       </div>
     </Modal>

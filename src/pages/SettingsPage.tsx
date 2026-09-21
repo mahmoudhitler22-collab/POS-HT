@@ -7,8 +7,9 @@ import { Button } from '@/components/ui/Button';
 import { Input, Textarea } from '@/components/ui/Input';
 import { useAuth } from '@/context/AuthContext';
 import { normalizeLocalizedNumber } from '@/lib/money';
+import { normalizeSocialUrl } from '@/lib/print';
 import {
-  Settings as SettingsIcon, Store, CreditCard, Star, Save, Plus, X, Percent
+  Settings as SettingsIcon, Store, CreditCard, Star, Save, Plus, X, Percent, Share2
 } from 'lucide-react';
 
 export function SettingsPage() {
@@ -22,6 +23,10 @@ export function SettingsPage() {
   const [loyaltyEnabled, setLoyaltyEnabled] = useState(false);
   const [loyaltyPointsPer1000, setLoyaltyPointsPer1000] = useState('10');
   const [receiptFooter, setReceiptFooter] = useState('');
+  const [facebookName, setFacebookName] = useState('');
+  const [facebookUrl, setFacebookUrl] = useState('');
+  const [instagramName, setInstagramName] = useState('');
+  const [tiktokName, setTiktokName] = useState('');
   const [invoicePrefix, setInvoicePrefix] = useState('INV');
   const [paymentMethods, setPaymentMethods] = useState<string[]>(['Cash', 'Card / Visa', 'Instapay', 'Other']);
   const [newPaymentMethod, setNewPaymentMethod] = useState('');
@@ -40,6 +45,10 @@ export function SettingsPage() {
     setLoyaltyEnabled(map.loyalty_enabled === '1');
     setLoyaltyPointsPer1000(map.loyalty_points_per_1000_egp || '10');
     setReceiptFooter(map.receipt_footer || '');
+    setFacebookName(map.social_facebook_name || '');
+    setFacebookUrl(map.social_facebook_url || '');
+    setInstagramName(map.social_instagram_name || '');
+    setTiktokName(map.social_tiktok_name || '');
     setInvoicePrefix(map.invoice_prefix || 'INV');
     setMaxDiscountPct(map.max_discount_percentage || '20');
     try { setPaymentMethods(JSON.parse(map.payment_methods || '["Cash","Card / Visa","Instapay","Other"]')); } catch { /* keep default */ }
@@ -48,6 +57,11 @@ export function SettingsPage() {
   useEffect(() => { load(); }, [load]);
 
   const save = async () => {
+    const normalizedFacebookUrl = normalizeSocialUrl(facebookUrl);
+    if (normalizedFacebookUrl === null) {
+      toast('error', 'Facebook page link is not valid');
+      return;
+    }
     setSaving(true);
     const updates: Record<string, string> = {
       store_name: storeName,
@@ -58,6 +72,10 @@ export function SettingsPage() {
       loyalty_enabled: loyaltyEnabled ? '1' : '0',
       loyalty_points_per_1000_egp: normalizeLocalizedNumber(loyaltyPointsPer1000),
       receipt_footer: receiptFooter,
+      social_facebook_name: facebookName.trim(),
+      social_facebook_url: normalizedFacebookUrl,
+      social_instagram_name: instagramName.trim(),
+      social_tiktok_name: tiktokName.trim(),
       invoice_prefix: invoicePrefix,
       payment_methods: JSON.stringify(paymentMethods),
       max_discount_percentage: normalizeLocalizedNumber(maxDiscountPct),
@@ -114,6 +132,21 @@ export function SettingsPage() {
           <Input label="Currency Symbol" value={currencySymbol} onChange={(e) => setCurrencySymbol(e.target.value)} />
           <Textarea label="Receipt Footer" rows={2} value={receiptFooter} onChange={(e) => setReceiptFooter(e.target.value)} />
           <Input label="Invoice Number Prefix" value={invoicePrefix} onChange={(e) => setInvoicePrefix(e.target.value)} />
+        </div>
+      </div>
+
+      {/* Social media on the receipt */}
+      <div className="card p-6">
+        <div className="flex items-center gap-2 mb-1">
+          <Share2 size={20} className="text-slate-600" />
+          <h3 className="font-semibold text-slate-900">Social Media on Receipt</h3>
+        </div>
+        <p className="text-xs text-slate-400 mb-4">Printed at the bottom of every receipt. Leave a field empty to hide it.</p>
+        <div className="space-y-4">
+          <Input label="Facebook Page Name" placeholder="e.g. Elakrammen Store" value={facebookName} onChange={(e) => setFacebookName(e.target.value)} />
+          <Input label="Facebook Page Link (printed as a QR code)" placeholder="https://www.facebook.com/your.page" value={facebookUrl} onChange={(e) => setFacebookUrl(e.target.value)} />
+          <Input label="Instagram Account Name" placeholder="e.g. @elakrammen" value={instagramName} onChange={(e) => setInstagramName(e.target.value)} />
+          <Input label="TikTok Account Name" placeholder="e.g. @elakrammen" value={tiktokName} onChange={(e) => setTiktokName(e.target.value)} />
         </div>
       </div>
 

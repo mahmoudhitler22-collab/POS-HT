@@ -3,6 +3,7 @@
 
 import { formatEgp, formatQuantity } from './money';
 import { getAuthSessionId } from '@/db/client';
+import { qrSvg } from './qr';
 
 export interface PrinterInfo {
   name: string;
@@ -37,12 +38,116 @@ export async function printHtml(
 
 // ─── Receipt HTML ─────────────────────────────────────────
 
+// ─── Receipt layout (margins are measured per printer, see the test sheet) ───
+
+export interface ReceiptLayout {
+  paperMm: number;  // roll width
+  leftMm: number;   // blank space on the LEFT edge
+  rightMm: number;  // blank space on the RIGHT edge
+  topMm: number;    // blank space above the first line (also used below the last line)
+}
+
+export const DEFAULT_RECEIPT_LAYOUT: ReceiptLayout = { paperMm: 80, leftMm: 5, rightMm: 5, topMm: 5 };
+const LAYOUT_STORAGE_KEY = 'receipt_layout_v1';
+
+export function sanitizeReceiptLayout(input?: Partial<ReceiptLayout> | null): ReceiptLayout {
+  const d = DEFAULT_RECEIPT_LAYOUT;
+  const num = (v: unknown, fallback: number, min: number, max: number) => {
+    const n = typeof v === 'number' ? v : Number.NaN;
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+  };
+  const paperMm = num(input?.paperMm, d.paperMm, 40, 120);
+  let leftMm = num(input?.leftMm, d.leftMm, 0, 30);
+  let rightMm = num(input?.rightMm, d.rightMm, 0, 30);
+  const topMm = num(input?.topMm, d.topMm, 0, 30);
+  // keep at least 40mm of printable content
+  const maxSides = paperMm - 40;
+  if (leftMm + rightMm > maxSides) {
+    const k = maxSides / (leftMm + rightMm);
+    leftMm *= k; rightMm *= k;
+  }
+  return { paperMm, leftMm, rightMm, topMm };
+}
+
+export function loadReceiptLayout(): ReceiptLayout {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LAYOUT_STORAGE_KEY) : null;
+    return sanitizeReceiptLayout(raw ? JSON.parse(raw) : null);
+  } catch {
+    return { ...DEFAULT_RECEIPT_LAYOUT };
+  }
+}
+
+export function saveReceiptLayout(layout: ReceiptLayout): void {
+  try {
+    localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(sanitizeReceiptLayout(layout)));
+  } catch {
+    /* storage unavailable: layout simply is not remembered */
+  }
+}
+
+// ─── Social media block (receipt footer) ──────────────────
+
+export interface SocialLinks {
+  facebookName: string;
+  /** Link of the Facebook page; when valid it is printed as a QR code. */
+  facebookUrl: string;
+  instagramName: string;
+  tiktokName: string;
+}
+
+/**
+ * '' → no link. A valid http(s) link → the normalised link ("facebook.com/x" becomes
+ * "https://facebook.com/x"). Anything else → null (invalid).
+ */
+export function normalizeSocialUrl(input: string): string | null {
+  const value = input.trim();
+  if (!value) return '';
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
+  try {
+    const url = new URL(withScheme);
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname.includes('.')) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+const ICON_ATTRS = 'width="4.2mm" height="4.2mm" viewBox="0 0 24 24" style="display:block;flex:none"';
+const SOCIAL_ICONS = {
+  facebook: `<svg xmlns="http://www.w3.org/2000/svg" ${ICON_ATTRS}><circle cx="12" cy="12" r="11" fill="#000"/><path d="M13.2 19.5v-6.3h2.1l.4-2.6h-2.5V9c0-.75.3-1.25 1.3-1.25h1.3V5.5c-.25 0-1-.1-1.9-.1-1.9 0-3.2 1.15-3.2 3.3v1.9H8.6v2.6h2.1v6.3z" fill="#fff"/></svg>`,
+  instagram: `<svg xmlns="http://www.w3.org/2000/svg" ${ICON_ATTRS}><rect x="2.5" y="2.5" width="19" height="19" rx="5.5" fill="none" stroke="#000" stroke-width="2"/><circle cx="12" cy="12" r="4.3" fill="none" stroke="#000" stroke-width="2"/><circle cx="17.4" cy="6.6" r="1.3" fill="#000"/></svg>`,
+  tiktok: `<svg xmlns="http://www.w3.org/2000/svg" ${ICON_ATTRS}><path d="M14.5 3v11.2a3.6 3.6 0 1 1-3.6-3.6" fill="none" stroke="#000" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.5 3c.3 2.6 2 4.4 4.8 4.7" fill="none" stroke="#000" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+};
+
+/** HTML for the social block. Inline styles only, so the same markup is used for printing and for the on-screen preview. */
+export function socialFooterHtml(social: SocialLinks | undefined, language: 'ar' | 'en' = 'en'): string {
+  if (!social) return '';
+  const row = (icon: string, name: string) => name.trim()
+    ? `<div dir="auto" style="display:flex;align-items:center;justify-content:center;gap:1.5mm;margin:1.2mm 0;font-size:11px;">${icon}<span dir="auto">${escapeHtml(name.trim())}</span></div>`
+    : '';
+  const rows = row(SOCIAL_ICONS.facebook, social.facebookName)
+    + row(SOCIAL_ICONS.instagram, social.instagramName)
+    + row(SOCIAL_ICONS.tiktok, social.tiktokName);
+
+  const url = normalizeSocialUrl(social.facebookUrl);
+  const qr = url ? qrSvg(url) : null;
+  const caption = language === 'ar' ? 'امسح الكود لزيارة صفحتنا على فيسبوك' : 'Scan to visit our Facebook page';
+  const qrBlock = qr
+    ? `<div style="text-align:center;margin-top:2mm;"><div style="font-size:10px;margin-bottom:1mm;" dir="auto">${caption}</div><div style="display:inline-block;line-height:0;">${qr}</div></div>`
+    : '';
+
+  return rows || qrBlock ? `<div style="margin-top:6px;">${rows}${qrBlock}</div>` : '';
+}
+
 export interface ReceiptData {
   language?: 'ar' | 'en';
+  layout?: Partial<ReceiptLayout>;
   storeName: string;
   storeAddress: string;
   storePhone: string;
   receiptFooter: string;
+  social?: SocialLinks;
   invoiceNumber: string;
   date: Date;
   cashierName: string;
@@ -62,6 +167,7 @@ export interface ReceiptData {
 
 export function generateReceiptHtml(data: ReceiptData): string {
   const isArabic = data.language === 'ar';
+  const layout = sanitizeReceiptLayout(data.layout);
   const labels = isArabic ? {
     phone: 'هاتف', invoice: 'الفاتورة', date: 'التاريخ', time: 'الوقت', cashier: 'الكاشير', customer: 'العميل',
     item: 'الصنف', quantity: 'الكمية', price: 'السعر', total: 'الإجمالي', discount: 'الخصم', subtotal: 'الإجمالي قبل الخصم',
@@ -93,30 +199,35 @@ export function generateReceiptHtml(data: ReceiptData): string {
 <head>
 <meta charset="utf-8">
 <style>
-  @page { size: 80mm; margin: 0; }
+  /* NOTE: no "size" in @page. "size: 80mm" means an 80mm x 80mm page and splits the
+     receipt over two sheets. The real paper size (80mm wide) is passed by Receipt.tsx. */
+  @page { margin: 0; }
   html { margin: 0; padding: 0; }
   body {
+    box-sizing: border-box;
     font-family: ${isArabic ? "Tahoma, Arial, sans-serif" : "'Courier New', monospace"};
     font-size: 12px;
     color: #000;
-    width: 80mm;
+    width: ${layout.paperMm}mm;            /* full roll width ... */
     margin: 0;
-    padding: 4mm;
-    box-sizing: border-box;
+    /* ... blank space is made with PHYSICAL paddings (left/right never flip in RTL) */
+    padding: ${layout.topMm}mm ${layout.rightMm}mm ${layout.topMm}mm ${layout.leftMm}mm;
     direction: ${isArabic ? 'rtl' : 'ltr'};
+    overflow-wrap: anywhere;
   }
   .header { text-align: center; margin-bottom: 8px; }
   .header h2 { font-size: 18px; font-weight: bold; margin: 0; }
   .header p { font-size: 11px; margin: 2px 0; }
   .divider { border-top: 1px dashed #000; margin: 6px 0; }
   .info { font-size: 11px; }
-  .info-row { display: flex; justify-content: space-between; margin: 1px 0; }
-  table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  th { text-align: left; border-bottom: 1px solid #000; padding: 2px 0; }
+  .info-row { display: flex; justify-content: space-between; gap: 6px; margin: 1px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+  th { text-align: start; border-bottom: 1px solid #000; padding: 2px 0; white-space: nowrap; }
+  .item-col { width: 30%; } .qty-col { width: 14%; } .price-col { width: 28%; } .total-col { width: 28%; }
   .qty { text-align: center; }
-  .price, .total { text-align: right; }
+  .price, .total { text-align: end; }
   .item-name { padding: 2px 0; }
-  .discount-line { font-size: 10px; color: #555; text-align: right; padding: 0; }
+  .discount-line { font-size: 10px; color: #555; text-align: end; padding: 0; }
   .totals { font-size: 12px; margin-top: 4px; }
   .total-row { font-size: 14px; font-weight: bold; border-top: 1px solid #000; padding-top: 4px; margin-top: 4px; }
   .footer { text-align: center; font-size: 10px; margin-top: 8px; }
@@ -138,6 +249,7 @@ export function generateReceiptHtml(data: ReceiptData): string {
   </div>
   <div class="divider"></div>
   <table>
+    <colgroup><col class="item-col"><col class="qty-col"><col class="price-col"><col class="total-col"></colgroup>
     <thead>
       <tr><th>${labels.item}</th><th class="qty">${labels.quantity}</th><th class="price">${labels.price}</th><th class="total">${labels.total}</th></tr>
     </thead>
@@ -151,8 +263,48 @@ export function generateReceiptHtml(data: ReceiptData): string {
   </div>
   <div class="divider"></div>
   <div class="footer">
-    <p>${escapeHtml(data.receiptFooter)}</p>
+    <p dir="auto">${escapeHtml(data.receiptFooter)}</p>
+    ${socialFooterHtml(data.social, isArabic ? 'ar' : 'en')}
   </div>
+</body>
+</html>`;
+}
+
+// ─── Printer test sheet ───────────────────────────────────
+// Prints a "staircase" of numbers: row N has the number N written N millimetres
+// from the LEFT edge and N millimetres from the RIGHT edge of the paper.
+// The first number that is fully visible on each side = how many mm that side cuts off.
+
+export function generateCalibrationHtml(language: 'ar' | 'en' = 'ar', paperMm = 80): string {
+  const isArabic = language === 'ar';
+  const rows = Array.from({ length: 16 }, (_, i) =>
+    `<div class="row"><span class="l" style="left:${i}mm">${i}</span><span class="r" style="right:${i}mm">${i}</span></div>`
+  ).join('');
+  const title = isArabic ? 'ورقة اختبار الطابعة' : 'Printer test sheet';
+  const lines = isArabic
+    ? ['الرقم = المسافة بالمليمتر من حافة الورقة.', 'اقرأ أول رقم يظهر كاملاً على اليسار، ثم على اليمين.', 'ضع الرقم زائد واحد في خانة الهامش لكل جانب بالبرنامج.']
+    : ['Number = distance in mm from the paper edge.', 'Read the first fully visible number on the left, then on the right.', 'Enter that number plus 1 in the matching margin box in the app.'];
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { margin: 0; }
+  html { margin: 0; padding: 0; }
+  body { box-sizing: border-box; width: ${paperMm}mm; margin: 0; padding: 4mm 0; font-family: Arial, Tahoma, sans-serif; color: #000; direction: ltr; }
+  .title { text-align: center; font-size: 4.2mm; font-weight: bold; margin: 0 0 1mm; }
+  .note { text-align: center; font-size: 2.9mm; margin: 0 auto 2mm; padding: 0 16mm; direction: ${isArabic ? 'rtl' : 'ltr'}; }
+  .frame { width: ${paperMm}mm; box-sizing: border-box; border-left: 0.5mm solid #000; border-right: 0.5mm solid #000; }
+  .row { position: relative; height: 4.6mm; line-height: 4.6mm; font-size: 3.4mm; }
+  .row span { position: absolute; top: 0; }
+  .edge { border-top: 0.5mm solid #000; }
+</style>
+</head>
+<body>
+  <p class="title">${title}</p>
+  ${lines.map((l) => `<p class="note">${l}</p>`).join('')}
+  <div class="frame edge">${rows}</div>
+  <div class="edge"></div>
 </body>
 </html>`;
 }

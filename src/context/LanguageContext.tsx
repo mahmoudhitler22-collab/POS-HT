@@ -173,6 +173,15 @@ const operationalAr: Record<string, string> = {
   'Duplicate color name': 'اسم اللون مكرر', 'Duplicate size name': 'اسم المقاس مكرر',
   'Total active variants': 'إجمالي المتغيرات المفعّلة',
   'Receipt': 'الإيصال', 'Receipt Preview': 'معاينة الإيصال', 'Close': 'إغلاق', 'Printing...': 'جارٍ الطباعة...',
+  'New Sale': 'بيع جديد', 'New sale tab': 'فاتورة بيع جديدة', 'Close tab': 'إغلاق الفاتورة', 'Close Sale Tab': 'إغلاق فاتورة البيع',
+  'Discard & Close': 'تجاهل وإغلاق', 'Sale was interrupted': 'تم اعتراض عملية البيع', 'Dismiss': 'إخفاء',
+  'The app closed while this sale was being charged. Check the Invoices page before charging it again.': 'تم إغلاق التطبيق أثناء تحصيل هذا البيع. راجع صفحة الفواتير قبل إعادة التحصيل.',
+  'This sale is being processed. Wait for it to finish.': 'هذا البيع قيد المعالجة. انتظر حتى ينتهي.', 'Open sales': 'فواتير بيع مفتوحة',
+  'Social Media on Receipt': 'حسابات التواصل على الإيصال',
+  'Printed at the bottom of every receipt. Leave a field empty to hide it.': 'تُطبع أسفل كل إيصال. اترك الخانة فارغة لإخفائها.',
+  'Facebook Page Name': 'اسم صفحة فيسبوك', 'Facebook Page Link (printed as a QR code)': 'رابط صفحة فيسبوك (يُطبع كـ QR)',
+  'Instagram Account Name': 'اسم حساب إنستجرام', 'TikTok Account Name': 'اسم حساب تيك توك',
+  'Facebook page link is not valid': 'رابط صفحة فيسبوك غير صحيح',
   'Print Receipt': 'طباعة الإيصال', 'Printer': 'الطابعة', 'Default': 'الافتراضي', 'Item': 'الصنف',
   'Price': 'السعر', 'This is a computer-generated receipt': 'هذا إيصال صادر من النظام',
 };
@@ -188,7 +197,15 @@ function translateArabicText(value: string): string {
 
   const patterns: Array<[RegExp, (...parts: string[]) => string]> = [
     [/^Added: (.+)$/, (name) => `تمت إضافة: ${name}`],
+    [/^Sale completed: (.+) \(Sale (\d+)\)$/, (invoice, number) => `تم إتمام البيع: ${invoice} (بيع ${number})`],
     [/^Sale completed: (.+)$/, (number) => `تم إتمام البيع: ${number}`],
+    [/^Sale (\d+)$/, (number) => `بيع ${number}`],
+    [/^Only (.+) available — the rest is held in other sale tabs$/, (quantity) => `المتاح ${quantity} فقط — الباقي محجوز في فواتير بيع أخرى مفتوحة`],
+    [/^(.+): all stock is held in other sale tabs$/, (name) => `${name}: كل الكمية محجوزة في فواتير بيع أخرى مفتوحة`],
+    [/^(.+) held in other sale tabs$/, (quantity) => `${quantity} محجوزة في فواتير بيع أخرى مفتوحة`],
+    [/^(.+) is no longer available$/, (name) => `${name} لم يعد متاحًا`],
+    [/^Price updated: (.+)$/, (name) => `تم تحديث السعر: ${name}`],
+    [/^This sale has (\d+) item\(s\) in the cart\. Close it and discard them\?$/, (count) => `يحتوي هذا البيع على ${count} صنف في السلة. هل تريد إغلاقه وتجاهل السلة؟`],
     [/^Refund processed: (.+)$/, (amount) => `تم تنفيذ الاسترجاع: ${amount}`],
     [/^Only (.+) in stock$/, (quantity) => `المتاح في المخزون: ${quantity}`],
     [/^(.+) is out of stock$/, (name) => `${name} غير متوفر في المخزون`],
@@ -225,6 +242,11 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   const isArabic = language === 'ar';
   const originalText = useRef(new WeakMap<Text, string>());
   const originalAttributes = useRef(new WeakMap<Element, Map<string, string>>());
+  // What this component last wrote into a node. If a node holds neither its source
+  // text nor what we wrote, React changed it (e.g. a total or a counter) and that
+  // new value is the new source; otherwise we would put the stale first value back.
+  const writtenText = useRef(new WeakMap<Text, string>());
+  const writtenAttributes = useRef(new WeakMap<Element, Map<string, string>>());
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, language);
@@ -236,21 +258,28 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     const attributeNames = ['placeholder', 'title', 'aria-label'];
     const localizeNode = (node: Node) => {
       const localizeText = (text: Text) => {
-        const source = originalText.current.get(text) ?? text.data;
-        if (!originalText.current.has(text)) originalText.current.set(text, source);
+        const known = originalText.current.get(text);
+        const written = writtenText.current.get(text);
+        const source = known !== undefined && (text.data === known || text.data === written) ? known : text.data;
+        originalText.current.set(text, source);
         const next = isArabic ? translateArabicText(source) : source;
         if (text.data !== next) text.data = next;
+        writtenText.current.set(text, next);
       };
       const localizeElement = (element: Element) => {
         const sources = originalAttributes.current.get(element) ?? new Map<string, string>();
         originalAttributes.current.set(element, sources);
+        const written = writtenAttributes.current.get(element) ?? new Map<string, string>();
+        writtenAttributes.current.set(element, written);
         for (const name of attributeNames) {
           const current = element.getAttribute(name);
           if (current === null) continue;
-          const source = sources.get(name) ?? current;
+          const known = sources.get(name);
+          const source = known !== undefined && (current === known || current === written.get(name)) ? known : current;
           sources.set(name, source);
           const next = isArabic ? translateArabicText(source) : source;
           if (current !== next) element.setAttribute(name, next);
+          written.set(name, next);
         }
       };
 

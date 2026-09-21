@@ -1,6 +1,7 @@
 import { type ReactNode } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useLanguage } from '@/context/LanguageContext';
+import { usePosSessions } from '@/context/PosSessionsContext';
 import { Button } from '@/components/ui/Button';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import {
@@ -69,6 +70,8 @@ interface LayoutProps {
 export function Layout({ current, onNavigate, children }: LayoutProps) {
   const { user, logout, hasPermission } = useAuth();
   const { t, isArabic } = useLanguage();
+  const { tabs: saleTabs } = usePosSessions();
+  const openSales = saleTabs.filter((tab) => tab.cart.length > 0).length;
 
   const visibleItems = NAV_ITEMS.filter((item) => hasPermission(item.permission) || (item.altPermission && hasPermission(item.altPermission)));
 
@@ -99,6 +102,11 @@ export function Layout({ current, onNavigate, children }: LayoutProps) {
             >
               {item.icon}
               {t(item.label)}
+              {item.key === 'pos' && openSales > 0 && (
+                <span className="ml-auto inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-teal-500 px-1.5 text-[11px] font-bold text-white" title="Open sales">
+                  {openSales}
+                </span>
+              )}
             </button>
           ))}
         </nav>

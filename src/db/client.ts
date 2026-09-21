@@ -168,7 +168,17 @@ async function pgliteExec(sql: string, params?: unknown[]): Promise<void> {
   }
 }
 
-async function pgliteTransaction<T>(fn: (tx: TransactionContext) => Promise<T>): Promise<T> {
+// PGlite has ONE connection, so two overlapping BEGIN … COMMIT blocks (e.g. two sale tabs
+// completing at the same moment) would be merged into a single transaction. Run them one at a time.
+let pgliteTxQueue: Promise<unknown> = Promise.resolve();
+
+function pgliteTransaction<T>(fn: (tx: TransactionContext) => Promise<T>): Promise<T> {
+  const run = pgliteTxQueue.then(() => runPgliteTransaction(fn));
+  pgliteTxQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function runPgliteTransaction<T>(fn: (tx: TransactionContext) => Promise<T>): Promise<T> {
   const db = await getPglite();
   await db.exec('BEGIN');
   try {

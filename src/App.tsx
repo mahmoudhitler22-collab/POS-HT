@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
 import { SettingsProvider } from '@/context/SettingsContext';
 import { LanguageProvider, useLanguage } from '@/context/LanguageContext';
+import { PosSessionsProvider } from '@/context/PosSessionsContext';
 import { ToastContainer } from '@/components/ui/Toast';
 import { Layout, type PageKey } from '@/components/Layout';
 import { LoginPage } from '@/pages/LoginPage';
@@ -145,7 +146,9 @@ function App() {
     <LanguageProvider>
       <AuthProvider>
         <SettingsProvider>
-          <AppContent />
+          <PosSessionsProvider>
+            <AppContent />
+          </PosSessionsProvider>
           <ToastContainer />
         </SettingsProvider>
       </AuthProvider>

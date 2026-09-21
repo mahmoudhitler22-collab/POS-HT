@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useRef, useImperativeHandle, forwardRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { getAuthSessionId, query, transaction } from '@/db/client';
 import { useAuth } from '@/context/AuthContext';
 import { useSettings } from '@/context/SettingsContext';
+import { usePosSessions, cartItemKey, type SaleTab } from '@/context/PosSessionsContext';
 import { logAudit } from '@/lib/audit';
 import { formatEgp, formatQuantity, parseLocalizedNumber, toPiasters } from '@/lib/money';
 import { arabicSearchPattern, normalizeArabicSql } from '@/lib/search';
@@ -13,111 +14,45 @@ import { Receipt } from '@/components/Receipt';
 import type { Product, ProductVariant, CartItem, Sale } from '@/types';
 import {
   Search, Plus, Minus, Trash2, ShoppingCart, Barcode,
-  CreditCard, Banknote, Smartphone, Wallet, Check, X,
+  CreditCard, Banknote, Smartphone, Wallet, Check, X, Loader2, CheckCircle2, AlertTriangle,
 } from 'lucide-react';
 
 type PosProduct = Product & { variant_count: number; variant_total_stock: number };
 
-const cartItemKey = (productId: number, variantId: number | null) =>
-  `${productId}:${variantId ?? 'product'}`;
-
-// ─── Per-tab snapshot ──────────────────────────────────────
-// Everything a sale tab needs to be fully restored after switching.
-interface SaleTabState {
-  id: number;
-  label: string;
-  search: string;
-  searchResults: PosProduct[];
-  variantProduct: PosProduct | null;
-  variantChoices: ProductVariant[];
-  cart: CartItem[];
-  customerId: string;
-  paymentMethod: string;
-  showPaymentModal: boolean;
-  isCompletingSale: boolean;
-  completedSale: Sale | null;
-  globalDiscountType: 'percentage' | 'fixed' | 'none';
-  globalDiscountValue: string;
-  // barcode-scanner transient refs (not critical to restore but kept for consistency)
-  barcodeBuffer: string;
-  lastKeyTime: number;
-}
-
-let tabIdCounter = 1;
-
-function createTabState(label: string): SaleTabState {
-  return {
-    id: tabIdCounter++,
-    label,
-    search: '',
-    searchResults: [],
-    variantProduct: null,
-    variantChoices: [],
-    cart: [],
-    customerId: '',
-    paymentMethod: 'Cash',
-    showPaymentModal: false,
-    isCompletingSale: false,
-    completedSale: null,
-    globalDiscountType: 'none',
-    globalDiscountValue: '',
-    barcodeBuffer: '',
-    lastKeyTime: 0,
-  };
-}
-
-// ─── Active sale panel ─────────────────────────────────────
-// Renders a single sale session. PosPage passes in the saved snapshot
-// and calls ref.capture() before switching away to persist state.
-export interface PosSalePanelHandle {
-  capture: () => SaleTabState;
-}
-
-const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(function PosSalePanel(
-  { tab },
-  ref,
-) {
+// ─── One sale panel ────────────────────────────────────────
+// All sale data (cart, customer, discount, payment, receipt…) lives in the
+// PosSessions store, keyed by tab id. This component only holds throw-away UI
+// state (search results, the variant picker, the customer list). Because
+// nothing about a sale is stored here, switching tabs or leaving the POS page
+// can never lose or mix sale data.
+function PosSalePanel({ tab }: { tab: SaleTab }) {
   const { user, hasPermission } = useAuth();
   const { get } = useSettings();
-  const [search, setSearch] = useState(tab.search);
-  const [searchResults, setSearchResults] = useState<PosProduct[]>(tab.searchResults);
-  const [variantProduct, setVariantProduct] = useState<PosProduct | null>(tab.variantProduct);
-  const [variantChoices, setVariantChoices] = useState<ProductVariant[]>(tab.variantChoices);
-  const [cart, setCart] = useState<CartItem[]>(tab.cart);
-  const [customerId, setCustomerId] = useState<string>(tab.customerId);
-  const [customers, setCustomers] = useState<{ id: number; name: string; phone: string | null }[]>([]);
-  const [paymentMethod, setPaymentMethod] = useState(tab.paymentMethod);
-  const [showPaymentModal, setShowPaymentModal] = useState(tab.showPaymentModal);
-  const [isCompletingSale, setIsCompletingSale] = useState(tab.isCompletingSale);
-  const [completedSale, setCompletedSale] = useState<Sale | null>(tab.completedSale);
-  const [globalDiscountType, setGlobalDiscountType] = useState<'percentage' | 'fixed' | 'none'>(tab.globalDiscountType);
-  const [globalDiscountValue, setGlobalDiscountValue] = useState(tab.globalDiscountValue);
-  const searchRef = useRef<HTMLInputElement>(null);
-  const barcodeBufferRef = useRef<string>(tab.barcodeBuffer);
-  const lastKeyTimeRef = useRef<number>(tab.lastKeyTime);
-  const completingSaleRef = useRef(false);
+  const { updateTab, getTab, getActiveId, reservedByOthers, refreshStock } = usePosSessions();
+  const tabId = tab.id;
+  const {
+    search, cart, customerId, paymentMethod, showPaymentModal,
+    isCompletingSale, completedSale, globalDiscountType, globalDiscountValue,
+  } = tab;
 
-  // Expose the current state so PosPage can snapshot before switching tabs.
-  useImperativeHandle(ref, () => ({
-    capture: () => ({
-      id: tab.id,
-      label: tab.label,
-      search,
-      searchResults,
-      variantProduct,
-      variantChoices,
-      cart,
-      customerId,
-      paymentMethod,
-      showPaymentModal,
-      isCompletingSale,
-      completedSale,
-      globalDiscountType,
-      globalDiscountValue,
-      barcodeBuffer: barcodeBufferRef.current,
-      lastKeyTime: lastKeyTimeRef.current,
-    }),
-  }), [tab, search, searchResults, variantProduct, variantChoices, cart, customerId, paymentMethod, showPaymentModal, isCompletingSale, completedSale, globalDiscountType, globalDiscountValue]);
+  const [searchResults, setSearchResults] = useState<PosProduct[]>([]);
+  const [variantProduct, setVariantProduct] = useState<PosProduct | null>(null);
+  const [variantChoices, setVariantChoices] = useState<ProductVariant[]>([]);
+  const [customers, setCustomers] = useState<{ id: number; name: string; phone: string | null }[]>([]);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const barcodeBufferRef = useRef<string>('');
+  const lastKeyTimeRef = useRef<number>(0);
+
+  // Setters that write into THIS tab's record in the store.
+  const patch = useCallback((changes: Partial<SaleTab>) => updateTab(tabId, changes), [updateTab, tabId]);
+  const setSearch = (value: string) => patch({ search: value });
+  const setCustomerId = (value: string) => patch({ customerId: value });
+  const setPaymentMethod = (value: string) => patch({ paymentMethod: value });
+  const setShowPaymentModal = (value: boolean) => patch({ showPaymentModal: value });
+  const setCompletedSale = (value: Sale | null) => patch({ completedSale: value });
+  const setGlobalDiscountType = (value: 'percentage' | 'fixed' | 'none') => patch({ globalDiscountType: value });
+  const setGlobalDiscountValue = (value: string) => patch({ globalDiscountValue: value });
+  const setCart = (items: CartItem[]) => patch({ cart: items });
 
   const paymentMethods: string[] = (() => {
     try { return JSON.parse(get('payment_methods', '["Cash","Card / Visa","Instapay","Other"]')); }
@@ -132,12 +67,17 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
   }, []);
   useEffect(() => { loadCustomers(); }, [loadCustomers]);
 
+  // Whenever this tab is shown (tab switch, or coming back from another page)
+  // re-read live stock/prices: another tab or another page may have changed them.
+  useEffect(() => { void refreshStock([tabId]); }, [refreshStock, tabId]);
+
   // Search products
   useEffect(() => {
     if (!search.trim()) {
       setSearchResults([]);
       return;
     }
+    let cancelled = false;
     const timer = setTimeout(async () => {
       const res = await query<PosProduct>(
         `SELECT p.*,
@@ -148,12 +88,15 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
            ORDER BY p.name LIMIT 20`,
         [arabicSearchPattern(search)]
       );
-      setSearchResults(res.rows);
+      if (!cancelled) setSearchResults(res.rows);
     }, 150);
-    return () => clearTimeout(timer);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [search]);
 
-  // Barcode scanner detection (USB scanners act as fast keyboard input)
+  // Barcode scanner detection (USB scanners act as fast keyboard input).
+  // The handler always calls the latest scan function through a ref, so it
+  // never works with a stale cart or stale settings.
+  const scanRef = useRef<(code: string) => Promise<void>>(async () => {});
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Only capture if focused on search input
@@ -167,13 +110,14 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
 
       if (e.key === 'Enter') {
         const code = barcodeBufferRef.current.trim();
+        const typed = getTab(tabId)?.search.trim() ?? '';
         if (code.length >= 4) {
           e.preventDefault();
-          handleBarcodeScan(code);
+          void scanRef.current(code);
           barcodeBufferRef.current = '';
-        } else if (search.trim()) {
+        } else if (typed) {
           // Normal search enter — try exact barcode match first
-          handleBarcodeScan(search.trim());
+          void scanRef.current(typed);
         }
         return;
       }
@@ -184,7 +128,7 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [search]);
+  }, [getTab, tabId]);
 
   const handleBarcodeScan = async (code: string) => {
     const variantRes = await query<ProductVariant & { product_name: string; product_sku: string | null; product_barcode: string | null; product_selling_price: number; product_purchase_cost: number; product_min_stock_level: number }>(
@@ -198,7 +142,7 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
     );
     if (variantRes.rows.length > 0) {
       const variant = variantRes.rows[0];
-      addToCart({
+      const added = addToCart({
         id: variant.product_id,
         name: variant.product_name,
         sku: variant.product_sku,
@@ -212,7 +156,7 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
       } as PosProduct, variant);
       setSearch('');
       setSearchResults([]);
-      toast('success', `Added: ${variant.product_name}`);
+      if (added) toast('success', `Added: ${variant.product_name}`);
     } else {
       // Try as SKU
       const skuRes = await query<PosProduct>(
@@ -223,17 +167,19 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
         [code]
       );
       if (skuRes.rows.length > 0) {
-        void selectProduct(skuRes.rows[0]);
+        const added = await selectProduct(skuRes.rows[0]);
         setSearch('');
         setSearchResults([]);
-        toast('success', `Added: ${skuRes.rows[0].name}`);
+        if (added) toast('success', `Added: ${skuRes.rows[0].name}`);
       } else {
         toast('error', `No product found for barcode: ${code}`);
       }
     }
   };
+  scanRef.current = handleBarcodeScan;
 
-  const selectProduct = async (product: PosProduct) => {
+  /** Returns true when the product went straight into the cart. */
+  const selectProduct = async (product: PosProduct): Promise<boolean> => {
     if (Number(product.variant_count) > 0) {
       const variants = await query<ProductVariant>(
         'SELECT * FROM product_variants WHERE product_id = $1 AND is_active = 1 ORDER BY color, size',
@@ -241,84 +187,106 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
       );
       setVariantProduct(product);
       setVariantChoices(variants.rows);
-      return;
+      return false;
     }
-    addToCart(product);
+    return addToCart(product);
   };
 
-  const addToCart = (product: Product, variant: ProductVariant | null = null) => {
-    const availableStock = variant?.quantity ?? product.quantity;
-    if (!allowNegativeStock && availableStock <= 0) {
-      toast('error', `${product.name} is out of stock`);
-      return;
+  // Stock this tab may still take: real stock minus what other open sales already hold.
+  const explainLimit = (name: string, free: number, held: number) => {
+    if (free <= 0) {
+      toast('error', held > 0 ? `${name}: all stock is held in other sale tabs` : `${name} is out of stock`);
+    } else if (held > 0) {
+      toast('error', `Only ${formatQuantity(free)} available — the rest is held in other sale tabs`);
+    } else {
+      toast('error', `Only ${formatQuantity(free)} in stock`);
+    }
+  };
+
+  /** Returns true when the item was added / its quantity increased. */
+  const addToCart = (product: Product, variant: ProductVariant | null = null): boolean => {
+    const current = getTab(tabId);
+    // A sale that is being charged is locked: nothing may be added to it.
+    if (!current || current.isCompletingSale) return false;
+    const availableStock = Number(variant?.quantity ?? product.quantity);
+    const key = cartItemKey(product.id, variant?.id ?? null);
+    const held = reservedByOthers(tabId, key);
+    const free = availableStock - held;
+    const existing = current.cart.find((item) => cartItemKey(item.product_id, item.variant_id) === key);
+    const wanted = (existing?.quantity ?? 0) + 1;
+    if (!allowNegativeStock && wanted > free) {
+      explainLimit(product.name, Math.max(0, free), held);
+      return false;
     }
     const variantLabel = variant ? [variant.color, variant.size].filter(Boolean).join(' / ') : null;
-    const key = cartItemKey(product.id, variant?.id ?? null);
-    setCart((prev) => {
-      const existing = prev.find((item) => cartItemKey(item.product_id, item.variant_id) === key);
-      if (existing) {
-        if (!allowNegativeStock && existing.quantity + 1 > availableStock) {
-          toast('error', `Only ${formatQuantity(availableStock)} in stock`);
-          return prev;
-        }
-        return prev.map((item) =>
-          cartItemKey(item.product_id, item.variant_id) === key ? { ...item, quantity: item.quantity + 1 } : item
-        );
+    updateTab(tabId, (t) => {
+      const found = t.cart.some((item) => cartItemKey(item.product_id, item.variant_id) === key);
+      if (found) {
+        return {
+          cart: t.cart.map((item) =>
+            cartItemKey(item.product_id, item.variant_id) === key
+              ? { ...item, quantity: item.quantity + 1, available_stock: availableStock }
+              : item
+          ),
+        };
       }
-      return [...prev, {
-        product_id: product.id,
-        variant_id: variant?.id ?? null,
-        variant_label: variantLabel,
-        name: variantLabel ? `${product.name} — ${variantLabel}` : product.name,
-        barcode: variant?.barcode ?? product.barcode,
-        unit_price: variant?.selling_price ?? product.selling_price,
-        quantity: 1,
-        discount_type: null,
-        discount_value: 0,
-        available_stock: availableStock,
-        cost: variant?.purchase_cost ?? product.purchase_cost ?? 0,
-      }];
+      return {
+        cart: [...t.cart, {
+          product_id: product.id,
+          variant_id: variant?.id ?? null,
+          variant_label: variantLabel,
+          name: variantLabel ? `${product.name} — ${variantLabel}` : product.name,
+          barcode: variant?.barcode ?? product.barcode,
+          unit_price: variant?.selling_price ?? product.selling_price,
+          quantity: 1,
+          discount_type: null,
+          discount_value: 0,
+          available_stock: availableStock,
+          cost: variant?.purchase_cost ?? product.purchase_cost ?? 0,
+        }],
+      };
     });
+    return true;
   };
 
-  const updateQuantity = (itemKey: string, delta: number) => {
-    setCart((prev) => {
-      return prev.map((item) => {
-        if (cartItemKey(item.product_id, item.variant_id) !== itemKey) return item;
-        const newQty = item.quantity + delta;
-        if (newQty <= 0) return item;
-        if (!allowNegativeStock && newQty > item.available_stock) {
-          toast('error', `Only ${formatQuantity(item.available_stock)} in stock`);
-          return item;
-        }
-        return { ...item, quantity: newQty };
-      });
-    });
-  };
-
-  const setQuantity = (itemKey: string, qty: number) => {
-    setCart((prev) => prev.map((item) => {
-      if (cartItemKey(item.product_id, item.variant_id) !== itemKey) return item;
-      if (qty <= 0) return item;
-      if (!allowNegativeStock && qty > item.available_stock) {
-        toast('error', `Only ${formatQuantity(item.available_stock)} in stock`);
-        return item;
+  const changeQuantity = (itemKey: string, compute: (item: CartItem) => number) => {
+    const current = getTab(tabId);
+    const item = current?.cart.find((line) => cartItemKey(line.product_id, line.variant_id) === itemKey);
+    if (!item) return;
+    const newQty = compute(item);
+    if (newQty <= 0) return;
+    if (!allowNegativeStock) {
+      const held = reservedByOthers(tabId, itemKey);
+      const free = item.available_stock - held;
+      if (newQty > free) {
+        explainLimit(item.name, Math.max(0, free), held);
+        return;
       }
-      return { ...item, quantity: qty };
+    }
+    updateTab(tabId, (t) => ({
+      cart: t.cart.map((line) => (cartItemKey(line.product_id, line.variant_id) === itemKey ? { ...line, quantity: newQty } : line)),
     }));
   };
 
+  const updateQuantity = (itemKey: string, delta: number) => changeQuantity(itemKey, (item) => item.quantity + delta);
+  const setQuantity = (itemKey: string, qty: number) => changeQuantity(itemKey, () => qty);
+
   const removeItem = (itemKey: string) => {
-    setCart((prev) => prev.filter((item) => cartItemKey(item.product_id, item.variant_id) !== itemKey));
+    updateTab(tabId, (t) => ({ cart: t.cart.filter((item) => cartItemKey(item.product_id, item.variant_id) !== itemKey) }));
   };
 
   const setItemDiscount = (itemKey: string, type: 'percentage' | 'fixed' | null, value: number) => {
-    setCart((prev) => prev.map((item) =>
-      cartItemKey(item.product_id, item.variant_id) === itemKey
-        ? { ...item, discount_type: type, discount_value: value }
-        : item
-    ));
+    updateTab(tabId, (t) => ({
+      cart: t.cart.map((item) =>
+        cartItemKey(item.product_id, item.variant_id) === itemKey
+          ? { ...item, discount_type: type, discount_value: value }
+          : item
+      ),
+    }));
   };
+
+  // Items whose quantity is more than the real stock (stock changed after they were added).
+  const overStockItems = allowNegativeStock ? [] : cart.filter((item) => item.quantity > item.available_stock);
 
   // Calculate each item's discount before applying any sale-wide discount.
   const cartWithItemDiscounts = cart.map((item) => {
@@ -369,9 +337,17 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
   const maxDiscountPct = parseLocalizedNumber(get('max_discount_percentage', '20'));
 
   const completeSale = async () => {
-    if (completingSaleRef.current) return;
+    // Read the live record (not the render closure) so a double click, or a
+    // click from a re-mounted panel, can never start the same sale twice.
+    const current = getTab(tabId);
+    if (!current || current.isCompletingSale) return;
     if (cart.length === 0) {
       toast('error', 'Cart is empty');
+      return;
+    }
+    if (overStockItems.length > 0) {
+      const item = overStockItems[0];
+      explainLimit(item.name, Math.max(0, item.available_stock), 0);
       return;
     }
 
@@ -390,8 +366,8 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
       }
     }
 
-    completingSaleRef.current = true;
-    setIsCompletingSale(true);
+    // Lock this tab (and persist the flag immediately) before any async work.
+    updateTab(tabId, { isCompletingSale: true });
     try {
       let sale: Sale;
       if (window.electronAPI) {
@@ -505,30 +481,43 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
         });
       }
 
+      // The sale is committed. From here on nothing may turn it into a "failed" sale.
       // The desktop handler writes the audit entry atomically with the sale.
       if (!window.electronAPI) {
-        await logAudit({
-          user_id: user?.id ?? null,
-          action: 'sale_complete',
-          entity_type: 'sale',
-          entity_id: sale.id,
-          new_value: JSON.stringify({ invoice: sale.invoice_number, total, payment_method: paymentMethod }),
-        });
+        try {
+          await logAudit({
+            user_id: user?.id ?? null,
+            action: 'sale_complete',
+            entity_type: 'sale',
+            entity_id: sale.id,
+            new_value: JSON.stringify({ invoice: sale.invoice_number, total, payment_method: paymentMethod }),
+          });
+        } catch (auditError) {
+          console.error('Audit log failed after a committed sale:', auditError);
+        }
       }
 
-      setCompletedSale(window.electronAPI ? sale : { ...sale, total, payment_method: paymentMethod, subtotal, discount_amount: totalDiscount, customer_id: customerId ? parseInt(customerId, 10) : null, cashier_id: user!.id, status: 'completed', notes: null, created_at: new Date().toISOString() } as Sale);
-      setCart([]);
-      setCustomerId('');
-      setGlobalDiscountType('none');
-      setGlobalDiscountValue('');
-      setShowPaymentModal(false);
-      toast('success', `Sale completed: ${sale.invoice_number}`);
+      // The result is written to the tab that started the sale, even if the
+      // cashier is looking at another tab (or another page) by now.
+      updateTab(tabId, {
+        completedSale: window.electronAPI ? sale : { ...sale, total, payment_method: paymentMethod, subtotal, discount_amount: totalDiscount, customer_id: customerId ? parseInt(customerId, 10) : null, cashier_id: user!.id, status: 'completed', notes: null, created_at: new Date().toISOString() } as Sale,
+        cart: [],
+        customerId: '',
+        globalDiscountType: 'none',
+        globalDiscountValue: '',
+        showPaymentModal: false,
+        isCompletingSale: false,
+        interrupted: false,
+      });
+      const suffix = getActiveId() === tabId ? '' : ` (Sale ${current.number})`;
+      toast('success', `Sale completed: ${sale.invoice_number}${suffix}`);
+      // Stock just changed: bring the other open sales up to date.
+      void refreshStock();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Sale failed';
+      updateTab(tabId, { isCompletingSale: false, showPaymentModal: false });
       toast('error', `Sale failed: ${msg}`);
-    } finally {
-      completingSaleRef.current = false;
-      setIsCompletingSale(false);
+      void refreshStock([tabId]);
     }
   };
 
@@ -540,7 +529,13 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
   };
 
   return (
-    <div className="flex h-full gap-6">
+    <div className="relative flex h-full gap-6">
+      {/* While a sale is being charged nothing in it may change. */}
+      {isCompletingSale && !showPaymentModal && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60">
+          <Loader2 size={32} className="animate-spin text-teal-600" />
+        </div>
+      )}
       {/* Left: Product Search */}
       <div className="flex-1 flex flex-col">
         <div className="p-6 pb-3">
@@ -621,6 +616,14 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
           </Select>
         </div>
 
+        {tab.interrupted && cart.length > 0 && (
+          <div className="mx-4 mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+            <p className="flex items-center gap-1.5 font-semibold"><AlertTriangle size={14} /> Sale was interrupted</p>
+            <p className="mt-1">The app closed while this sale was being charged. Check the Invoices page before charging it again.</p>
+            <button onClick={() => patch({ interrupted: false })} className="mt-2 font-semibold underline">Dismiss</button>
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto scrollbar-thin">
           {cart.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-slate-300 p-8">
@@ -663,6 +666,17 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
                       <span className="font-semibold text-slate-900">{formatEgp(item.lineTotal)}</span>
                     </div>
                   </div>
+                  {!allowNegativeStock && item.quantity > item.available_stock && (
+                    <p className="mt-1.5 flex items-center gap-1 text-xs font-medium text-red-600">
+                      <AlertTriangle size={12} />
+                      {item.available_stock <= 0 ? 'Out of Stock' : `Only ${formatQuantity(item.available_stock)} in stock`}
+                    </p>
+                  )}
+                  {reservedByOthers(tabId, cartItemKey(item.product_id, item.variant_id)) > 0 && (
+                    <p className="mt-1 text-xs text-slate-400">
+                      {`${formatQuantity(reservedByOthers(tabId, cartItemKey(item.product_id, item.variant_id)))} held in other sale tabs`}
+                    </p>
+                  )}
                   {hasPermission('products.modify_price') && (
                     <div className="flex gap-2 mt-2">
                       <select
@@ -737,7 +751,18 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
                 <span>{formatEgp(total)}</span>
               </div>
             </div>
-            <Button size="lg" className="w-full" onClick={() => setShowPaymentModal(true)}>
+            <Button
+              size="lg"
+              className="w-full"
+              disabled={isCompletingSale}
+              onClick={() => {
+                if (overStockItems.length > 0) {
+                  explainLimit(overStockItems[0].name, Math.max(0, overStockItems[0].available_stock), 0);
+                  return;
+                }
+                setShowPaymentModal(true);
+              }}
+            >
               <CreditCard size={20} /> Charge {formatEgp(total)}
             </Button>
           </div>
@@ -825,93 +850,68 @@ const PosSalePanel = forwardRef<PosSalePanelHandle, { tab: SaleTabState }>(funct
       )}
     </div>
   );
-});
+}
 
 // ─── Tab manager ───────────────────────────────────────────
 export function PosPage() {
-  const [tabs, setTabs] = useState<SaleTabState[]>(() => [createTabState('Sale 1')]);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const { tabs, activeId, addTab, switchTab, closeTab } = usePosSessions();
   const [closeTarget, setCloseTarget] = useState<number | null>(null);
-  const panelRef = useRef<PosSalePanelHandle>(null);
 
-  const captureActive = useCallback((): SaleTabState => {
-    if (panelRef.current) {
-      return panelRef.current.capture();
+  const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs[0];
+  const closeTabRecord = tabs.find((tab) => tab.id === closeTarget);
+
+  const requestCloseTab = (id: number) => {
+    const target = tabs.find((tab) => tab.id === id);
+    if (!target) return;
+    if (target.isCompletingSale) {
+      toast('error', 'This sale is being processed. Wait for it to finish.');
+      return;
     }
-    return tabs[activeIndex];
-  }, [tabs, activeIndex]);
-
-  const switchTab = (index: number) => {
-    if (index === activeIndex) return;
-    const snapshot = captureActive();
-    setTabs((prev) => prev.map((t, i) => (i === activeIndex ? snapshot : t)));
-    setActiveIndex(index);
-  };
-
-  const addTab = () => {
-    const snapshot = captureActive();
-    setTabs((prev) => {
-      const next = prev.map((t, i) => (i === activeIndex ? snapshot : t));
-      const newTab = createTabState(`Sale ${prev.length + 1}`);
-      next.push(newTab);
-      setActiveIndex(next.length - 1);
-      return next;
-    });
-  };
-
-  const requestCloseTab = (index: number) => {
-    // Capture current state first so the confirmation reflects reality.
-    if (index === activeIndex) {
-      const snapshot = captureActive();
-      setTabs((prev) => prev.map((t, i) => (i === activeIndex ? snapshot : t)));
+    // Nothing to lose in an empty tab — close it straight away.
+    if (target.cart.length === 0) {
+      closeTab(id);
+      return;
     }
-    setCloseTarget(index);
+    setCloseTarget(id);
   };
 
   const confirmCloseTab = () => {
-    if (closeTarget === null) return;
-    const index = closeTarget;
+    if (closeTarget !== null && !closeTab(closeTarget)) {
+      toast('error', 'This sale is being processed. Wait for it to finish.');
+    }
     setCloseTarget(null);
-    setTabs((prev) => {
-      if (prev.length <= 1) return prev;
-      const next = prev.filter((_, i) => i !== index);
-      const newIndex = index >= next.length ? next.length - 1 : (index < activeIndex ? activeIndex - 1 : activeIndex);
-      setActiveIndex(Math.max(0, newIndex));
-      // Relabel tabs sequentially
-      return next.map((t, i) => ({ ...t, label: `Sale ${i + 1}` }));
-    });
   };
-
-  const cancelCloseTab = () => setCloseTarget(null);
-
-  const closeTargetHasItems = closeTarget !== null && tabs[closeTarget]?.cart.length > 0;
 
   return (
     <div className="flex flex-col h-[calc(100vh-3rem)] -m-6">
       {/* Sale tab bar */}
       <div className="flex items-center gap-1 px-4 pt-3 bg-white border-b border-slate-200">
         <div className="flex items-center gap-1 flex-1 overflow-x-auto scrollbar-thin">
-          {tabs.map((tab, index) => (
+          {tabs.map((tab) => (
             <div
               key={tab.id}
-              className={`group flex items-center gap-2 px-4 py-2 rounded-t-lg cursor-pointer text-sm font-medium transition-colors ${
-                index === activeIndex
+              className={`group flex items-center gap-2 px-4 py-2 rounded-t-lg cursor-pointer text-sm font-medium transition-colors whitespace-nowrap ${
+                tab.id === activeTab.id
                   ? 'bg-teal-50 text-teal-700 border-t border-l border-r border-teal-200'
                   : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
               }`}
-              onClick={() => switchTab(index)}
+              onClick={() => switchTab(tab.id)}
             >
               <span className="flex items-center gap-1.5">
-                {tab.cart.length > 0 && (
+                {tab.isCompletingSale ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : tab.completedSale ? (
+                  <CheckCircle2 size={14} className="text-emerald-600" />
+                ) : tab.cart.length > 0 ? (
                   <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-teal-100 text-teal-700 text-[10px] font-bold">
                     {tab.cart.length}
                   </span>
-                )}
-                {tab.label}
+                ) : null}
+                {`Sale ${tab.number}`}
               </span>
               {tabs.length > 1 && (
                 <button
-                  onClick={(e) => { e.stopPropagation(); requestCloseTab(index); }}
+                  onClick={(e) => { e.stopPropagation(); requestCloseTab(tab.id); }}
                   className="ml-1 p-0.5 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 opacity-60 group-hover:opacity-100 transition-opacity"
                   title="Close tab"
                 >
@@ -930,21 +930,19 @@ export function PosPage() {
         </button>
       </div>
 
-      {/* Active sale panel */}
+      {/* Active sale panel — keyed so each tab always gets its own fresh panel */}
       <div className="flex-1 overflow-hidden">
-        <PosSalePanel ref={panelRef} tab={tabs[activeIndex]} />
+        <PosSalePanel key={activeTab.id} tab={activeTab} />
       </div>
 
       {/* Close-tab confirmation */}
       <ConfirmDialog
-        open={closeTarget !== null}
+        open={closeTarget !== null && !!closeTabRecord}
         title="Close Sale Tab"
-        message={closeTargetHasItems
-          ? `This tab has ${tabs[closeTarget!]?.cart.length} item(s) in the cart. Close it and discard the cart?`
-          : 'Close this empty sale tab?'}
-        confirmLabel={closeTargetHasItems ? 'Discard & Close' : 'Close'}
+        message={`This sale has ${closeTabRecord?.cart.length ?? 0} item(s) in the cart. Close it and discard them?`}
+        confirmLabel="Discard & Close"
         onConfirm={confirmCloseTab}
-        onCancel={cancelCloseTab}
+        onCancel={() => setCloseTarget(null)}
       />
     </div>
   );

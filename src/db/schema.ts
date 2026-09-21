@@ -2,7 +2,7 @@
 // All money values stored as integers (piasters/cents) to avoid floating-point errors.
 // EGP 1.00 = 100 piasters.
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export const SCHEMA_SQL = `
 -- Roles & permissions
@@ -57,12 +57,13 @@ CREATE TABLE IF NOT EXISTS suppliers (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Products
+-- Products (one row = one sellable SKU)
 CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sku TEXT UNIQUE,
   barcode TEXT UNIQUE,
   name TEXT NOT NULL,
+  model_name TEXT NOT NULL DEFAULT '',
   brand_id INTEGER REFERENCES brands(id),
   category_id INTEGER REFERENCES categories(id),
   type TEXT,
@@ -81,21 +82,27 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
 CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+CREATE INDEX IF NOT EXISTS idx_products_model ON products(model_name);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_id);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
 CREATE INDEX IF NOT EXISTS idx_products_size ON products(size);
 CREATE INDEX IF NOT EXISTS idx_products_color ON products(color);
 CREATE INDEX IF NOT EXISTS idx_products_active ON products(is_active);
+-- Unique among active products: (brand_id, model_name, color, size)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_products_unique_sku
+  ON products(brand_id, model_name, COALESCE(color, ''), COALESCE(size, ''))
+  WHERE is_active = 1;
 
--- Product variants (Color + Size combinations with independent stock/barcode/prices)
+-- Legacy product_variants table (deprecated in v5 — kept for migration only).
+-- New schema uses one products row per sellable SKU.
 CREATE TABLE IF NOT EXISTS product_variants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_id INTEGER NOT NULL REFERENCES products(id),
   size TEXT,
   color TEXT,
   barcode TEXT UNIQUE,
-  purchase_cost INTEGER,  -- NULL = use product default
-  selling_price INTEGER, -- NULL = use product default
+  purchase_cost INTEGER,
+  selling_price INTEGER,
   quantity REAL NOT NULL DEFAULT 0,
   min_stock_level REAL NOT NULL DEFAULT 0,
   is_active INTEGER NOT NULL DEFAULT 1,
@@ -104,8 +111,6 @@ CREATE TABLE IF NOT EXISTS product_variants (
 );
 CREATE INDEX IF NOT EXISTS idx_variants_product ON product_variants(product_id);
 CREATE INDEX IF NOT EXISTS idx_variants_barcode ON product_variants(barcode);
-
--- Customers
 CREATE TABLE IF NOT EXISTS customers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,

@@ -112,6 +112,87 @@ function applyIncrementalMigrations(currentVersion: number): void {
   if (currentVersion < 4 && !columnExists('users', 'must_change_password')) {
     db.exec('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0');
   }
+
+  if (currentVersion < 5) {
+    migrateVariantsToProducts(db);
+  }
+}
+
+// ─── v5: Flatten product_variants into standalone products ────
+// Each variant becomes its own products row with model_name copied
+// from the parent's name.  sale_items, refund_items,
+// inventory_movements, and barcode_labels are remapped so old
+// records point to the new product_id (variant_id is set to NULL).
+function migrateVariantsToProducts(database: Database.Database): void {
+  if (!columnExists('products', 'model_name')) {
+    database.exec('ALTER TABLE products ADD COLUMN model_name TEXT NOT NULL DEFAULT \'\'');
+  }
+
+  // Already migrated (no product_variants table or it's empty)
+  if (!tableExists('product_variants')) return;
+  const variantCount = database.prepare('SELECT COUNT(*) AS count FROM product_variants').get() as { count: number };
+  if (variantCount.count === 0) return;
+
+  // Set model_name = name for all existing products
+  database.exec("UPDATE products SET model_name = name WHERE model_name = '' OR model_name IS NULL");
+
+  // For each product with variants, create one new product per variant
+  const variants = database.prepare(
+    `SELECT pv.id AS variant_id, pv.product_id, pv.color, pv.size, pv.barcode,
+            pv.purchase_cost, pv.selling_price, pv.quantity, pv.min_stock_level,
+            p.name AS parent_name, p.model_name, p.brand_id, p.category_id,
+            p.type, p.supplier_id, p.notes, p.is_active
+       FROM product_variants pv
+       JOIN products p ON p.id = pv.product_id`
+  ).all() as Array<{
+    variant_id: number; product_id: number; color: string | null; size: string | null;
+    barcode: string | null; purchase_cost: number | null; selling_price: number | null;
+    quantity: number; min_stock_level: number; parent_name: string; model_name: string;
+    brand_id: number | null; category_id: number | null; type: string | null;
+    supplier_id: number | null; notes: string | null; is_active: number;
+  }>;
+
+  const insertProduct = database.prepare(
+    `INSERT INTO products (name, model_name, sku, barcode, brand_id, category_id, type, size, color,
+       purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes, is_active)
+     VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  for (const v of variants) {
+    const color = v.color || '';
+    const size = v.size || '';
+    const parts = [v.model_name, color, size].filter(Boolean);
+    const newName = parts.join(' - ');
+    const cost = v.purchase_cost ?? 0;
+    const price = v.selling_price ?? 0;
+
+    const info = insertProduct.run(
+      newName, v.model_name, v.barcode, v.brand_id, v.category_id, v.type,
+      v.size, v.color, cost, price, v.quantity, v.min_stock_level,
+      v.supplier_id, v.notes, v.is_active,
+    );
+    const newProductId = Number(info.lastInsertRowid);
+
+    // Remap sale_items
+    database.prepare('UPDATE sale_items SET product_id = ?, variant_id = NULL WHERE variant_id = ?')
+      .run(newProductId, v.variant_id);
+    // Remap refund_items
+    database.prepare('UPDATE refund_items SET product_id = ?, variant_id = NULL WHERE variant_id = ?')
+      .run(newProductId, v.variant_id);
+    // Remap inventory_movements
+    database.prepare('UPDATE inventory_movements SET product_id = ?, variant_id = NULL WHERE variant_id = ?')
+      .run(newProductId, v.variant_id);
+    // Remap barcode_labels
+    database.prepare('UPDATE barcode_labels SET product_id = ?, variant_id = NULL WHERE variant_id = ?')
+      .run(newProductId, v.variant_id);
+  }
+
+  // Deactivate old parent products that had variants
+  const parentIds = [...new Set(variants.map((v) => v.product_id))];
+  const placeholders = parentIds.map(() => '?').join(',');
+  database.prepare(`UPDATE products SET is_active = 0 WHERE id IN (${placeholders})`).run(...parentIds);
+
+  console.log(`[Database] Migrated ${variants.length} variants to standalone products, deactivated ${parentIds.length} parent products`);
 }
 
 function tableExists(tableName: string): boolean {

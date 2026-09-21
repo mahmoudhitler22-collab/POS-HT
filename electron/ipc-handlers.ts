@@ -211,7 +211,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       customerId: number | null;
       paymentMethod: string;
       globalDiscount: { type: 'percentage' | 'fixed' | 'none'; value: number };
-      items: Array<{ productId: number; variantId: number | null; quantity: number; discountType: 'percentage' | 'fixed' | null; discountValue: number }>;
+      items: Array<{ productId: number; quantity: number; discountType: 'percentage' | 'fixed' | null; discountValue: number }>;
     },
     sessionId?: number,
   ) => {
@@ -237,11 +237,10 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         const allowNegativeStock = settings.get('allow_negative_stock') === '1';
         const seenItems = new Set<string>();
         const items = request.items.map((input) => {
-          const itemKey = `${input.productId}:${input.variantId ?? 'product'}`;
-          if (!Number.isInteger(input.productId) || seenItems.has(itemKey)) {
-            throw new Error('Each product variant may appear only once in a sale');
+          if (!Number.isInteger(input.productId) || seenItems.has(String(input.productId))) {
+            throw new Error('Each product may appear only once in a sale');
           }
-          seenItems.add(itemKey);
+          seenItems.add(String(input.productId));
           if (!Number.isFinite(input.quantity) || input.quantity <= 0) throw new Error('Sale quantities must be positive');
           if (!Number.isFinite(input.discountValue) || input.discountValue < 0) throw new Error('Discount values must be non-negative');
           if (input.discountType !== null && input.discountType !== 'percentage' && input.discountType !== 'fixed') {
@@ -255,29 +254,19 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
             | { id: number; name: string; selling_price: number; purchase_cost: number; quantity: number; is_active: number }
             | undefined;
           if (!product || product.is_active !== 1) throw new Error('One or more products are unavailable');
-          type SaleVariant = { id: number; selling_price: number | null; purchase_cost: number | null; quantity: number; is_active: number };
-          let variant: SaleVariant | null = null;
-          if (input.variantId !== null) {
-            if (!Number.isInteger(input.variantId)) throw new Error('Invalid product variant');
-            variant = db.prepare(
-              'SELECT id, selling_price, purchase_cost, quantity, is_active FROM product_variants WHERE id = ? AND product_id = ?'
-            ).get(input.variantId, input.productId) as SaleVariant | undefined ?? null;
-            if (!variant || variant.is_active !== 1) throw new Error(`Selected variant for ${product.name} is unavailable`);
-          }
-          const availableQuantity = variant?.quantity ?? product.quantity;
-          if (!allowNegativeStock && availableQuantity < input.quantity) {
+          if (!allowNegativeStock && product.quantity < input.quantity) {
             throw new Error(`Insufficient stock for ${product.name}`);
           }
 
-          const unitPrice = variant?.selling_price ?? product.selling_price;
-          const cost = variant?.purchase_cost ?? product.purchase_cost;
+          const unitPrice = product.selling_price;
+          const cost = product.purchase_cost;
           const gross = unitPrice * input.quantity;
           const itemDiscount = input.discountType === 'percentage'
             ? Math.round(gross * input.discountValue / 100)
             : input.discountType === 'fixed'
               ? Math.min(Math.round(input.discountValue * 100), gross)
               : 0;
-          return { ...input, product, variant, unitPrice, cost, availableQuantity, gross, itemDiscount, afterItemDiscount: gross - itemDiscount };
+          return { ...input, product, unitPrice, cost, availableQuantity: product.quantity, gross, itemDiscount, afterItemDiscount: gross - itemDiscount };
         });
 
         const subtotal = items.reduce((total, item) => total + item.gross, 0);
@@ -320,20 +309,18 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
         const insertItem = db.prepare(
           `INSERT INTO sale_items (sale_id, product_id, variant_id, product_name, unit_price, quantity, discount_type, discount_value, discount_amount, final_price, cost_at_sale, line_total)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         const updateProduct = db.prepare("UPDATE products SET quantity = ?, updated_at = datetime('now') WHERE id = ?");
-        const updateVariant = db.prepare("UPDATE product_variants SET quantity = ?, updated_at = datetime('now') WHERE id = ?");
         const movement = db.prepare(
           `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
-           VALUES (?, ?, ?, ?, ?, 'Sale', 'sale', ?, ?)`,
+           VALUES (?, NULL, ?, ?, ?, 'Sale', 'sale', ?, ?)`,
         );
         for (const item of pricedItems) {
-          insertItem.run(saleId, item.product.id, item.variant?.id ?? null, item.product.name, item.unitPrice, item.quantity, item.discountType, item.discountType === 'fixed' ? Math.round(item.discountValue * 100) : item.discountValue, item.discountAmount, item.finalPrice, item.cost, item.finalPrice);
+          insertItem.run(saleId, item.product.id, item.product.name, item.unitPrice, item.quantity, item.discountType, item.discountType === 'fixed' ? Math.round(item.discountValue * 100) : item.discountValue, item.discountAmount, item.finalPrice, item.cost, item.finalPrice);
           const nextQuantity = item.availableQuantity - item.quantity;
-          if (item.variant) updateVariant.run(nextQuantity, item.variant.id);
-          else updateProduct.run(nextQuantity, item.product.id);
-          movement.run(item.product.id, item.variant?.id ?? null, -item.quantity, item.availableQuantity, nextQuantity, saleId, validation.session.userId);
+          updateProduct.run(nextQuantity, item.product.id);
+          movement.run(item.product.id, -item.quantity, item.availableQuantity, nextQuantity, saleId, validation.session.userId);
         }
         db.prepare('INSERT INTO payments (sale_id, method, amount) VALUES (?, ?, ?)').run(saleId, request.paymentMethod.trim(), total);
 
@@ -387,8 +374,8 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         }
 
         const refundLines = [...requested.entries()].map(([saleItemId, quantity]) => {
-          const item = db.prepare('SELECT id, sale_id, product_id, variant_id, product_name, unit_price, quantity, final_price FROM sale_items WHERE id = ?').get(saleItemId) as
-            | { id: number; sale_id: number; product_id: number; variant_id: number | null; product_name: string; unit_price: number; quantity: number; final_price: number }
+          const item = db.prepare('SELECT id, sale_id, product_id, product_name, unit_price, quantity, final_price FROM sale_items WHERE id = ?').get(saleItemId) as
+            | { id: number; sale_id: number; product_id: number; product_name: string; unit_price: number; quantity: number; final_price: number }
             | undefined;
           if (!item || item.sale_id !== sale.id) throw new Error('Refund item does not belong to this sale');
           const previous = db.prepare('SELECT COALESCE(SUM(quantity), 0) AS quantity, COALESCE(SUM(refund_amount), 0) AS amount FROM refund_items WHERE sale_item_id = ?').get(item.id) as { quantity: number; amount: number };
@@ -412,22 +399,17 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
           'INSERT INTO refunds (refund_number, sale_id, customer_id, cashier_id, total, reason) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
         ).get(refundNumber, sale.id, sale.customer_id, validation.session.userId, refundTotal, typeof request.reason === 'string' ? request.reason.trim() : '') as { id: number }).id;
 
-        const insertItem = db.prepare('INSERT INTO refund_items (refund_id, sale_item_id, product_id, variant_id, product_name, quantity, unit_price, refund_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+        const insertItem = db.prepare('INSERT INTO refund_items (refund_id, sale_item_id, product_id, variant_id, product_name, quantity, unit_price, refund_amount) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)');
         const productRow = db.prepare('SELECT quantity FROM products WHERE id = ?');
         const updateProduct = db.prepare("UPDATE products SET quantity = ?, updated_at = datetime('now') WHERE id = ?");
-        const variantRow = db.prepare('SELECT quantity FROM product_variants WHERE id = ? AND product_id = ?');
-        const updateVariant = db.prepare("UPDATE product_variants SET quantity = ?, updated_at = datetime('now') WHERE id = ?");
-        const movement = db.prepare("INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id) VALUES (?, ?, ?, ?, ?, 'Refund', 'refund', ?, ?)");
+        const movement = db.prepare("INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id) VALUES (?, NULL, ?, ?, ?, 'Refund', 'refund', ?, ?)");
         for (const line of refundLines) {
-          const inventory = line.item.variant_id === null
-            ? productRow.get(line.item.product_id) as { quantity: number } | undefined
-            : variantRow.get(line.item.variant_id, line.item.product_id) as { quantity: number } | undefined;
+          const inventory = productRow.get(line.item.product_id) as { quantity: number } | undefined;
           if (!inventory) throw new Error(`Product for ${line.item.product_name} no longer exists`);
-          insertItem.run(refundId, line.item.id, line.item.product_id, line.item.variant_id, line.item.product_name, line.quantity, line.item.unit_price, line.amount);
+          insertItem.run(refundId, line.item.id, line.item.product_id, line.item.product_name, line.quantity, line.item.unit_price, line.amount);
           const nextQuantity = inventory.quantity + line.quantity;
-          if (line.item.variant_id === null) updateProduct.run(nextQuantity, line.item.product_id);
-          else updateVariant.run(nextQuantity, line.item.variant_id);
-          movement.run(line.item.product_id, line.item.variant_id, line.quantity, inventory.quantity, nextQuantity, refundId, validation.session.userId);
+          updateProduct.run(nextQuantity, line.item.product_id);
+          movement.run(line.item.product_id, line.quantity, inventory.quantity, nextQuantity, refundId, validation.session.userId);
         }
         if (sale.customer_id !== null) {
           db.prepare('UPDATE customers SET total_purchases = MAX(0, total_purchases - ?) WHERE id = ?').run(refundTotal, sale.customer_id);
@@ -639,6 +621,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     _event,
     product: {
       name: string;
+      model_name: string;
       sku: string | null;
       barcode: string | null;
       category_id: number | null;
@@ -681,11 +664,12 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
       const result = db.transaction(() => {
         const insertProduct = db.prepare(
-          `INSERT INTO products (name, sku, barcode, category_id, brand_id, type, size, color, purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO products (name, model_name, sku, barcode, category_id, brand_id, type, size, color, purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         );
         const info = insertProduct.run(
           product.name.trim(),
+          (product.model_name || product.name).trim(),
           product.sku || null,
           product.barcode || null,
           product.category_id || null,
@@ -704,8 +688,8 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
         if (product.quantity > 0) {
           db.prepare(
-            `INSERT INTO inventory_movements (product_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
-             VALUES (?, ?, 0, ?, 'Initial stock', 'product_create', ?, ?)`
+            `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
+             VALUES (?, NULL, ?, 0, ?, 'Initial stock', 'product_create', ?, ?)`
           ).run(newId, product.quantity, product.quantity, newId, session.userId);
         }
 
@@ -725,178 +709,222 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     }
   });
 
-  // ─── Save Product With Variants (create or update atomically) ─
-  // Handles both new product creation and existing product editing.
-  // Variants are diffed against the database: new combinations are
-  // inserted, existing ones are updated, and combos no longer in the
-  // matrix are deactivated.  Everything runs in one SQLite transaction.
-  interface VariantInput {
-    color: string;
-    size: string;
+  // ─── Bulk Create Products (requires 'products.add') ──────
+  // Creates one independent product per filled cell in a color×size grid.
+  // Each product gets its own barcode/SKU, stock, and "Initial stock" movement.
+  // Everything runs in one SQLite transaction.
+  interface BulkProductInput {
+    model_name: string;
+    color: string | null;
+    size: string | null;
     quantity: number;
-    is_active: boolean;
+    selling_price: number;
+    purchase_cost: number;
+    barcode: string | null;
+    brand_id: number | null;
+    category_id: number | null;
+    type: string | null;
+    min_stock_level: number;
+    supplier_id: number | null;
+    notes: string | null;
   }
 
-  ipcMain.handle('db:saveProductWithVariants', async (
+  ipcMain.handle('db:bulkCreateProducts', async (
     _event,
-    payload: {
-      product: {
-        name: string;
-        sku: string | null;
-        barcode: string | null;
-        category_id: number | null;
-        brand_id: number | null;
-        type: string | null;
-        purchase_cost: number;
-        selling_price: number;
-        min_stock_level: number;
-        supplier_id: number | null;
-        notes: string | null;
-      };
-      productId: number | null;
-      variants: VariantInput[];
-    },
+    payload: { products: BulkProductInput[] },
     sessionId?: number,
-  ): Promise<{ success: boolean; productId?: number; error?: string }> => {
+  ): Promise<{ success: boolean; productIds?: number[]; error?: string }> => {
     try {
       const validation = validateSession(sessionId);
       if (!validation.ok) return { success: false, error: validation.error };
 
-      const isEdit = payload.productId !== null && payload.productId !== undefined;
-      const perm = isEdit ? 'products' : 'products.add';
-      const permCheck = requirePermission(sessionId!, perm);
+      const permCheck = requirePermission(sessionId!, 'products.add');
       if (!permCheck.ok) return { success: false, error: permCheck.error };
 
-      // Server-side validation
-      const p = payload.product;
-      if (!p.name || !p.name.trim()) return { success: false, error: 'Product name is required' };
-      if (p.selling_price <= 0) return { success: false, error: 'Selling price must be greater than zero' };
-      if (p.purchase_cost < 0) return { success: false, error: 'Purchase cost cannot be negative' };
+      if (!Array.isArray(payload.products) || payload.products.length === 0) {
+        return { success: false, error: 'At least one product is required' };
+      }
 
-      // Validate variants
+      // Validate all inputs
       const seen = new Set<string>();
-      for (const v of payload.variants) {
-        const color = (v.color || '').trim();
-        const size = (v.size || '').trim();
-        if (!color || !size) return { success: false, error: 'Variant color and size are required' };
-        const key = `${normalizeArabicSearch(color)}|${normalizeArabicSearch(size)}`;
-        if (seen.has(key)) return { success: false, error: `Duplicate variant: ${color} / ${size}` };
+      for (const p of payload.products) {
+        if (!p.model_name || !p.model_name.trim()) return { success: false, error: 'Model name is required' };
+        if (p.selling_price <= 0) return { success: false, error: 'Selling price must be greater than zero' };
+        if (p.purchase_cost < 0) return { success: false, error: 'Purchase cost cannot be negative' };
+        if (!Number.isFinite(p.quantity) || p.quantity < 0) return { success: false, error: 'Quantities must be non-negative' };
+        const key = `${normalizeArabicSearch(p.model_name)}|${normalizeArabicSearch(p.color || '')}|${normalizeArabicSearch(p.size || '')}`;
+        if (seen.has(key)) return { success: false, error: `Duplicate product: ${p.model_name} ${p.color || ''} ${p.size || ''}` };
         seen.add(key);
-        if (!Number.isFinite(v.quantity) || v.quantity < 0) return { success: false, error: 'Variant quantities must be non-negative' };
       }
 
       const session = getSession(sessionId!)!;
       const db = getDb();
 
-      const result = db.transaction(() => {
-        let productId: number;
-
-        if (isEdit) {
-          productId = payload.productId!;
-          db.prepare(
-            `UPDATE products SET
-              name = ?, sku = ?, barcode = ?, category_id = ?, brand_id = ?,
-              type = ?, size = NULL, color = NULL,
-              purchase_cost = ?, selling_price = ?,
-              min_stock_level = ?, supplier_id = ?, notes = ?,
-              updated_at = datetime('now')
-            WHERE id = ?`
-          ).run(
-            p.name.trim(), p.sku || null, p.barcode || null,
-            p.category_id || null, p.brand_id || null,
-            p.type || null,
-            p.purchase_cost, p.selling_price,
-            p.min_stock_level, p.supplier_id || null,
-            p.notes || null,
-            productId,
-          );
-        } else {
-          const info = db.prepare(
-            `INSERT INTO products (name, sku, barcode, category_id, brand_id, type, size, color, purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes)
-             VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 0, ?, ?, ?)`
-          ).run(
-            p.name.trim(), p.sku || null, p.barcode || null,
-            p.category_id || null, p.brand_id || null,
-            p.type || null,
-            p.purchase_cost, p.selling_price,
-            p.min_stock_level, p.supplier_id || null,
-            p.notes || null,
-          );
-          productId = Number(info.lastInsertRowid);
-        }
-
-        // ─── Variant sync ──────────────────────────────────
-        // Load existing variants for this product
-        const existing = db.prepare(
-          'SELECT id, color, size, quantity, is_active FROM product_variants WHERE product_id = ?'
-        ).all(productId) as Array<{ id: number; color: string; size: string; quantity: number; is_active: number }>;
-
-        // Build lookup of existing variants by lowercase color|size
-        const existingMap = new Map<string, { id: number; quantity: number; is_active: number }>();
-        for (const e of existing) {
-          existingMap.set(`${normalizeArabicSearch(e.color || '')}|${normalizeArabicSearch(e.size || '')}`, { id: e.id, quantity: e.quantity, is_active: e.is_active });
-        }
-
-        // Build set of desired variant keys
-        const desiredKeys = new Set<string>();
-        const insertVariant = db.prepare(
-          `INSERT INTO product_variants (product_id, color, size, quantity, is_active)
-           VALUES (?, ?, ?, ?, ?)`
-        );
-        const updateVariant = db.prepare(
-          `UPDATE product_variants SET quantity = ?, is_active = ?, updated_at = datetime('now') WHERE id = ?`
+      const ids = db.transaction(() => {
+        const insertProduct = db.prepare(
+          `INSERT INTO products (name, model_name, sku, barcode, brand_id, category_id, type, size, color, purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes)
+           VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         );
         const insertMovement = db.prepare(
           `INSERT INTO inventory_movements (product_id, variant_id, quantity_change, previous_quantity, new_quantity, reason, reference_type, reference_id, user_id)
-           VALUES (?, ?, ?, 0, ?, 'Initial stock', 'variant_create', NULL, ?)`
+           VALUES (?, NULL, ?, 0, ?, 'Initial stock', 'bulk_create', NULL, ?)`
+        );
+        const insertAudit = db.prepare(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_value)
+           VALUES (?, 'product_create', 'product', ?, ?)`
         );
 
-        for (const v of payload.variants) {
-          const color = v.color.trim();
-          const size = v.size.trim();
-          const key = `${normalizeArabicSearch(color)}|${normalizeArabicSearch(size)}`;
-          desiredKeys.add(key);
-
-          const ex = existingMap.get(key);
-          if (ex) {
-            // Update existing variant
-            const isActiveInt = v.is_active ? 1 : 0;
-            const needsUpdate = ex.quantity !== v.quantity || ex.is_active !== isActiveInt;
-            if (needsUpdate) {
-              updateVariant.run(v.quantity, isActiveInt, ex.id);
-            }
-          } else {
-            // Insert new variant
-            const vInfo = insertVariant.run(productId, color, size, v.quantity, v.is_active ? 1 : 0);
-            const variantId = Number(vInfo.lastInsertRowid);
-            // Record initial stock movement if quantity > 0
-            if (v.quantity > 0) {
-              insertMovement.run(productId, variantId, v.quantity, v.quantity, session.userId);
-            }
+        const result: number[] = [];
+        for (const p of payload.products) {
+          const parts = [p.model_name, p.color, p.size].filter(Boolean);
+          const name = parts.join(' - ');
+          const info = insertProduct.run(
+            name, p.model_name.trim(), p.barcode,
+            p.brand_id, p.category_id, p.type, p.size, p.color,
+            p.purchase_cost, p.selling_price, p.quantity, p.min_stock_level,
+            p.supplier_id, p.notes,
+          );
+          const newId = Number(info.lastInsertRowid);
+          result.push(newId);
+          if (p.quantity > 0) {
+            insertMovement.run(newId, p.quantity, p.quantity, session.userId);
           }
+          insertAudit.run(session.userId, newId, JSON.stringify(p));
         }
-
-        // Deactivate variants that are no longer in the matrix
-        for (const [key, ex] of existingMap) {
-          if (!desiredKeys.has(key) && ex.is_active === 1) {
-            updateVariant.run(ex.quantity, 0, ex.id);
-          }
-        }
-
-        // Audit log
-        db.prepare(
-          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_value)
-           VALUES (?, ?, 'product', ?, ?)`
-        ).run(session.userId, isEdit ? 'product_update' : 'product_create', productId, JSON.stringify({ product: p, variants: payload.variants }));
-
-        return productId;
+        return result;
       })();
 
-      return { success: true, productId: result };
+      return { success: true, productIds: ids };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to save product';
+      const msg = err instanceof Error ? err.message : 'Failed to create products';
+      const friendly = msg.includes('unique') || msg.includes('UNIQUE') ? 'Barcode already exists' : msg;
+      return { success: false, error: friendly };
+    }
+  });
+
+  // ─── Update Product (edit a single SKU) ──────────────────
+  ipcMain.handle('db:updateProduct', async (
+    _event,
+    payload: {
+      productId: number;
+      name: string;
+      model_name: string;
+      sku: string | null;
+      barcode: string | null;
+      category_id: number | null;
+      brand_id: number | null;
+      type: string | null;
+      size: string | null;
+      color: string | null;
+      purchase_cost: number;
+      selling_price: number;
+      min_stock_level: number;
+      supplier_id: number | null;
+      notes: string | null;
+    },
+    sessionId?: number,
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const validation = validateSession(sessionId);
+      if (!validation.ok) return { success: false, error: validation.error };
+      const permCheck = requirePermission(sessionId!, 'products');
+      if (!permCheck.ok) return { success: false, error: permCheck.error };
+
+      if (!payload.name || !payload.name.trim()) return { success: false, error: 'Product name is required' };
+      if (payload.selling_price <= 0) return { success: false, error: 'Selling price must be greater than zero' };
+      if (payload.purchase_cost < 0) return { success: false, error: 'Purchase cost cannot be negative' };
+
+      const session = getSession(sessionId!)!;
+      const db = getDb();
+
+      db.transaction(() => {
+        db.prepare(
+          `UPDATE products SET name = ?, model_name = ?, sku = ?, barcode = ?,
+            category_id = ?, brand_id = ?, type = ?, size = ?, color = ?,
+            purchase_cost = ?, selling_price = ?, min_stock_level = ?,
+            supplier_id = ?, notes = ?, updated_at = datetime('now')
+           WHERE id = ?`
+        ).run(
+          payload.name.trim(), (payload.model_name || payload.name).trim(),
+          payload.sku || null, payload.barcode || null,
+          payload.category_id || null, payload.brand_id || null,
+          payload.type || null, payload.size || null, payload.color || null,
+          payload.purchase_cost, payload.selling_price, payload.min_stock_level,
+          payload.supplier_id || null, payload.notes || null,
+          payload.productId,
+        );
+        db.prepare(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_value)
+           VALUES (?, 'product_update', 'product', ?, ?)`
+        ).run(session.userId, payload.productId, JSON.stringify(payload));
+      })();
+
+      return { success: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to update product';
       const friendly = msg.includes('unique') || msg.includes('UNIQUE') ? 'SKU or barcode already exists' : msg;
       return { success: false, error: friendly };
+    }
+  });
+
+  // ─── Bulk Edit Model (update cost/price/category for all SKUs of a model) ──
+  ipcMain.handle('db:bulkEditModel', async (
+    _event,
+    payload: {
+      model_name: string;
+      brand_id: number | null;
+      purchase_cost: number | null;
+      selling_price: number | null;
+      category_id: number | null;
+    },
+    sessionId?: number,
+  ): Promise<{ success: boolean; updated?: number; error?: string }> => {
+    try {
+      const validation = validateSession(sessionId);
+      if (!validation.ok) return { success: false, error: validation.error };
+      const permCheck = requirePermission(sessionId!, 'products');
+      if (!permCheck.ok) return { success: false, error: permCheck.error };
+
+      if (!payload.model_name || !payload.model_name.trim()) return { success: false, error: 'Model name is required' };
+
+      const session = getSession(sessionId!)!;
+      const db = getDb();
+
+      const result = db.transaction(() => {
+        const sets: string[] = [];
+        const params: unknown[] = [];
+        if (payload.purchase_cost !== null && payload.purchase_cost !== undefined) {
+          sets.push('purchase_cost = ?'); params.push(payload.purchase_cost);
+        }
+        if (payload.selling_price !== null && payload.selling_price !== undefined) {
+          sets.push('selling_price = ?'); params.push(payload.selling_price);
+        }
+        if (payload.category_id !== null && payload.category_id !== undefined) {
+          sets.push('category_id = ?'); params.push(payload.category_id || null);
+        }
+        sets.push("updated_at = datetime('now')");
+        params.push(payload.model_name.trim());
+        if (payload.brand_id !== null && payload.brand_id !== undefined) {
+          params.push(payload.brand_id);
+        }
+
+        let sql = `UPDATE products SET ${sets.join(', ')} WHERE model_name = ? AND is_active = 1`;
+        if (payload.brand_id !== null && payload.brand_id !== undefined) {
+          sql += ` AND brand_id = ?`;
+        }
+        const info = db.prepare(sql).run(...params);
+
+        db.prepare(
+          `INSERT INTO audit_logs (user_id, action, entity_type, new_value)
+           VALUES (?, 'product_bulk_update', 'product', ?)`
+        ).run(session.userId, JSON.stringify(payload));
+
+        return info.changes;
+      })();
+
+      return { success: true, updated: result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to bulk edit' };
     }
   });
 
@@ -930,7 +958,6 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       db.transaction(() => {
         db.prepare('DELETE FROM barcode_labels WHERE product_id = ?').run(productId);
         db.prepare('DELETE FROM inventory_movements WHERE product_id = ?').run(productId);
-        db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(productId);
         db.prepare('DELETE FROM products WHERE id = ?').run(productId);
         db.prepare(
           `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, previous_value)

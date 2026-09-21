@@ -20,6 +20,7 @@ export interface Product {
   sku: string | null;
   barcode: string | null;
   name: string;
+  model_name?: string;
   brand_id: number | null;
   brand_name?: string | null;
   category_id: number | null;
@@ -33,22 +34,6 @@ export interface Product {
   min_stock_level: number;
   supplier_id: number | null;
   notes: string | null;
-  is_active: number;
-  created_at: string;
-  updated_at: string;
-  variant_total_stock?: number | null;
-}
-
-export interface ProductVariant {
-  id: number;
-  product_id: number;
-  size: string | null;
-  color: string | null;
-  barcode: string | null;
-  purchase_cost: number | null;
-  selling_price: number | null;
-  quantity: number;
-  min_stock_level: number;
   is_active: number;
   created_at: string;
   updated_at: string;
@@ -191,8 +176,6 @@ export interface Setting {
 
 export interface CartItem {
   product_id: number;
-  variant_id: number | null;
-  variant_label: string | null;
   name: string;
   barcode: string | null;
   unit_price: number;

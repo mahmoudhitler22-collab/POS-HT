@@ -40,7 +40,7 @@ export interface ElectronAPI {
       customerId: number | null;
       paymentMethod: string;
       globalDiscount: { type: 'percentage' | 'fixed' | 'none'; value: number };
-      items: Array<{ productId: number; variantId: number | null; quantity: number; discountType: 'percentage' | 'fixed' | null; discountValue: number }>;
+      items: Array<{ productId: number; quantity: number; discountType: 'percentage' | 'fixed' | null; discountValue: number }>;
     }, sessionId?: number) => Promise<{ success: boolean; sale?: { id: number; invoice_number: string; subtotal: number; discount_amount: number; total: number; customer_id: number | null; cashier_id: number; payment_method: string; status: string; notes: null; created_at: string }; error?: string }>;
     processRefund: (request: {
       saleId: number;
@@ -63,6 +63,7 @@ export interface ElectronAPI {
     getInfo: (sessionId?: number) => Promise<{ success: boolean; path?: string; backupDir?: string; error?: string }>;
     createProduct: (product: {
       name: string;
+      model_name: string;
       sku: string | null;
       barcode: string | null;
       category_id: number | null;
@@ -77,40 +78,45 @@ export interface ElectronAPI {
       supplier_id: number | null;
       notes: string | null;
     }, sessionId?: number) => Promise<{ success: boolean; productId?: number; error?: string }>;
-    saveProductWithVariants: (payload: {
-      product: {
-        name: string;
-        sku: string | null;
-        barcode: string | null;
-        category_id: number | null;
-        brand_id: number | null;
-        type: string | null;
-        purchase_cost: number;
-        selling_price: number;
-        min_stock_level: number;
-        supplier_id: number | null;
-        notes: string | null;
-      };
-      productId: number | null;
-      variants: Array<{ color: string; size: string; quantity: number; is_active: boolean }>;
-    }, sessionId?: number) => Promise<{ success: boolean; productId?: number; error?: string }>;
-    saveProductWithVariants: (payload: {
-      product: {
-        name: string;
-        sku: string | null;
-        barcode: string | null;
-        category_id: number | null;
-        brand_id: number | null;
-        type: string | null;
-        purchase_cost: number;
-        selling_price: number;
-        min_stock_level: number;
-        supplier_id: number | null;
-        notes: string | null;
-      };
-      productId: number | null;
-      variants: Array<{ color: string; size: string; quantity: number; is_active: boolean }>;
-    }, sessionId?: number) => Promise<{ success: boolean; productId?: number; error?: string }>;
+    bulkCreateProducts: (products: Array<{
+      model_name: string;
+      color: string | null;
+      size: string | null;
+      quantity: number;
+      selling_price: number;
+      purchase_cost: number;
+      barcode: string | null;
+      brand_id: number | null;
+      category_id: number | null;
+      type: string | null;
+      min_stock_level: number;
+      supplier_id: number | null;
+      notes: string | null;
+    }>, sessionId?: number) => Promise<{ success: boolean; productIds?: number[]; error?: string }>;
+    updateProduct: (payload: {
+      productId: number;
+      name: string;
+      model_name: string;
+      sku: string | null;
+      barcode: string | null;
+      category_id: number | null;
+      brand_id: number | null;
+      type: string | null;
+      size: string | null;
+      color: string | null;
+      purchase_cost: number;
+      selling_price: number;
+      min_stock_level: number;
+      supplier_id: number | null;
+      notes: string | null;
+    }, sessionId?: number) => Promise<{ success: boolean; error?: string }>;
+    bulkEditModel: (payload: {
+      model_name: string;
+      brand_id: number | null;
+      purchase_cost: number | null;
+      selling_price: number | null;
+      category_id: number | null;
+    }, sessionId?: number) => Promise<{ success: boolean; updated?: number; error?: string }>;
     deleteProduct: (productId: number, sessionId?: number) => Promise<{ success: boolean; error?: string }>;
     deleteUser: (userId: number, sessionId?: number) => Promise<{ success: boolean; error?: string }>;
   };

@@ -144,10 +144,80 @@ async function runPgliteMigrations(db: PGlite): Promise<void> {
     if (currentVersion < 4) {
       await db.exec('ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password INTEGER NOT NULL DEFAULT 0');
     }
+    if (currentVersion < 5) {
+      await migrateVariantsToProductsPglite(db);
+    }
     await db.query(
       `UPDATE schema_meta SET value = $1 WHERE key = 'version'`,
       [String(SCHEMA_VERSION)]
     );
+  }
+}
+
+async function migrateVariantsToProductsPglite(db: PGlite): Promise<void> {
+  // Add model_name column if it doesn't exist
+  const cols = await db.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'model_name'`
+  );
+  if (cols.rows.length === 0) {
+    await db.exec("ALTER TABLE products ADD COLUMN model_name TEXT NOT NULL DEFAULT ''");
+  }
+
+  // Set model_name = name for all existing products
+  await db.exec("UPDATE products SET model_name = name WHERE model_name = '' OR model_name IS NULL");
+
+  // Check if product_variants table exists and has rows
+  const tableCheck = await db.query<{ exists: boolean }>(
+    `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'product_variants') as exists`
+  );
+  if (!tableCheck.rows[0]?.exists) return;
+
+  const variantCount = await db.query<{ count: string }>('SELECT COUNT(*) AS count FROM product_variants');
+  if (parseInt(variantCount.rows[0]?.count ?? '0', 10) === 0) return;
+
+  const variants = await db.query<{
+    variant_id: number; product_id: number; color: string | null; size: string | null;
+    barcode: string | null; purchase_cost: number | null; selling_price: number | null;
+    quantity: number; min_stock_level: number; parent_name: string; model_name: string;
+    brand_id: number | null; category_id: number | null; type: string | null;
+    supplier_id: number | null; notes: string | null; is_active: number;
+  }>(
+    `SELECT pv.id AS variant_id, pv.product_id, pv.color, pv.size, pv.barcode,
+            pv.purchase_cost, pv.selling_price, pv.quantity, pv.min_stock_level,
+            p.name AS parent_name, p.model_name, p.brand_id, p.category_id,
+            p.type, p.supplier_id, p.notes, p.is_active
+       FROM product_variants pv
+       JOIN products p ON p.id = pv.product_id`
+  );
+
+  for (const v of variants.rows) {
+    const color = v.color || '';
+    const size = v.size || '';
+    const parts = [v.model_name, color, size].filter(Boolean);
+    const newName = parts.join(' - ');
+    const cost = v.purchase_cost ?? 0;
+    const price = v.selling_price ?? 0;
+
+    const insertRes = await db.query<{ id: number }>(
+      `INSERT INTO products (name, model_name, sku, barcode, brand_id, category_id, type, size, color,
+         purchase_cost, selling_price, quantity, min_stock_level, supplier_id, notes, is_active)
+       VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+      [newName, v.model_name, v.barcode, v.brand_id, v.category_id, v.type,
+       v.size, v.color, cost, price, v.quantity, v.min_stock_level,
+       v.supplier_id, v.notes, v.is_active]
+    );
+    const newProductId = insertRes.rows[0].id;
+
+    await db.query('UPDATE sale_items SET product_id = $1, variant_id = NULL WHERE variant_id = $2', [newProductId, v.variant_id]);
+    await db.query('UPDATE refund_items SET product_id = $1, variant_id = NULL WHERE variant_id = $2', [newProductId, v.variant_id]);
+    await db.query('UPDATE inventory_movements SET product_id = $1, variant_id = NULL WHERE variant_id = $2', [newProductId, v.variant_id]);
+    await db.query('UPDATE barcode_labels SET product_id = $1, variant_id = NULL WHERE variant_id = $2', [newProductId, v.variant_id]);
+  }
+
+  // Deactivate old parent products
+  const parentIds = [...new Set(variants.rows.map((v) => v.product_id))];
+  for (const pid of parentIds) {
+    await db.query('UPDATE products SET is_active = 0 WHERE id = $1', [pid]);
   }
 }
 
@@ -249,7 +319,6 @@ export async function deleteProduct(productId: number): Promise<void> {
   await transaction(async (tx) => {
     await tx.exec('DELETE FROM barcode_labels WHERE product_id = $1', [productId]);
     await tx.exec('DELETE FROM inventory_movements WHERE product_id = $1', [productId]);
-    await tx.exec('DELETE FROM product_variants WHERE product_id = $1', [productId]);
     await tx.exec('DELETE FROM products WHERE id = $1', [productId]);
   });
 }
